@@ -12,6 +12,10 @@ export const PROVIDER_PRESETS = {
     defaultModel: '',
     needsKey: true,
     docs: 'https://docs.nano-gpt.com',
+    // Per-key limits per docs.nano-gpt.com/api-reference/miscellaneous/rate-limits:
+    // 10 concurrent requests, a 10-requests/10s burst bucket, 60 requests/minute.
+    // Concurrency above this just queues locally and risks needless 429s.
+    rateLimitNote: 'NanoGPT allows up to 10 concurrent requests per key (60/min). 6-8 is a safe, fast setting; going near/above 10 mostly just adds retries.',
   },
   anthropic: {
     label: 'Anthropic (Claude)',
@@ -53,7 +57,18 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
-async function withRetries(fn, { retries = 3, baseDelayMs = 1500 } = {}) {
+/** Reads a standard `Retry-After` header (seconds, or an HTTP-date) into a millisecond delay. */
+function parseRetryAfterMs(res) {
+  const header = res.headers.get('retry-after');
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const dateMs = Date.parse(header);
+  if (!Number.isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
+  return null;
+}
+
+async function withRetries(fn, { retries = 4, baseDelayMs = 1500 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -62,7 +77,14 @@ async function withRetries(fn, { retries = 3, baseDelayMs = 1500 } = {}) {
       lastErr = err;
       const retriable = err.retriable !== false; // default: retry
       if (!retriable || attempt === retries) break;
-      const delay = baseDelayMs * 2 ** attempt + Math.random() * 300;
+      // A long Retry-After (tens of minutes+) usually means a daily quota reset,
+      // not a transient rate limit — waiting it out would just block this worker
+      // slot for hours, so surface the error now instead of stalling the batch.
+      if (err.retryAfterMs != null && err.retryAfterMs > 30_000) break;
+      // Otherwise, a 429/503 that tells us exactly how long to wait (NanoGPT and
+      // most OpenAI-compatible APIs do) gets honored as-is instead of guessed at —
+      // that's the actual contract for staying within a provider's limits.
+      const delay = err.retryAfterMs ?? baseDelayMs * 2 ** attempt + Math.random() * 300;
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -103,6 +125,7 @@ function createAnthropicProvider(config) {
           const body = await res.text().catch(() => '');
           const err = new Error(`Anthropic API ${res.status}: ${body.slice(0, 500)}`);
           err.retriable = res.status === 429 || res.status >= 500;
+          err.retryAfterMs = parseRetryAfterMs(res);
           throw err;
         }
         const json = await res.json();
@@ -146,8 +169,9 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
         );
         if (!res.ok) {
           const body = await res.text().catch(() => '');
-          const err = new Error(`OpenAI-compatible API ${res.status}: ${body.slice(0, 500)}`);
+          const err = new Error(`${name} API ${res.status}: ${body.slice(0, 500)}`);
           err.retriable = res.status === 429 || res.status >= 500;
+          err.retryAfterMs = parseRetryAfterMs(res);
           throw err;
         }
         const json = await res.json();

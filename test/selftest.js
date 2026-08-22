@@ -8,7 +8,10 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import assert from 'node:assert/strict';
 
+import { createServer } from 'node:http';
+
 import { extractCardFromPng } from '../src/cardParser.js';
+import { createProvider } from '../src/llmClient.js';
 
 const run = promisify(execFile);
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
@@ -106,6 +109,24 @@ async function main() {
   const rescan = await run('node', [path.join(PROJECT_ROOT, 'src/cli.js'), 'scan', '--config', configPath]);
   assert.match(rescan.stdout, /0 need scoring/);
   console.log('✓ second scan skips already-cached cards (no rescore without --rescore)');
+
+  // Simulate a card that failed on a previous run (e.g. a network error, a bad
+  // response) and confirm the next plain `scan` — no --rescore needed — picks
+  // it back up automatically, exactly like a real failed card would.
+  const cacheWithFailure = JSON.parse(await readFile(cacheFile, 'utf8'));
+  cacheWithFailure.cards['bloated-card.png'].result = null;
+  cacheWithFailure.cards['bloated-card.png'].error = 'simulated network failure';
+  await writeFile(cacheFile, JSON.stringify(cacheWithFailure, null, 2));
+
+  const scanAfterFailure = await run('node', [path.join(PROJECT_ROOT, 'src/cli.js'), 'scan', '--config', configPath]);
+  assert.match(scanAfterFailure.stdout, /1 need scoring/);
+  assert.match(scanAfterFailure.stdout, /1 scored, 0 errors/);
+  console.log('✓ a previously-failed card is automatically retried on the next scan (no --rescore needed)');
+
+  const cacheAfterRetry = JSON.parse(await readFile(cacheFile, 'utf8'));
+  assert.equal(cacheAfterRetry.cards['bloated-card.png'].error, null);
+  assert.ok(cacheAfterRetry.cards['bloated-card.png'].result.overall_score >= 1);
+  console.log('✓ the retried card now has a clean result and no error in the cache');
 
   const stats = await run('node', [path.join(PROJECT_ROOT, 'src/cli.js'), 'stats', '--config', configPath]);
   assert.match(stats.stdout, /Total cached entries: 2/);
@@ -224,7 +245,44 @@ async function main() {
   }
 
   await rm(dir, { recursive: true, force: true });
+
+  await testRetryAfterHonored();
+
   console.log('\nAll self-tests passed.');
+}
+
+// A NanoGPT-style 429 with a Retry-After header must be honored as the actual
+// wait time, not papered over with generic exponential backoff — that's the
+// difference between behaving within a provider's stated limits and not.
+async function testRetryAfterHonored() {
+  let requestCount = 0;
+  const fakeApi = createServer((req, res) => {
+    requestCount++;
+    if (requestCount === 1) {
+      res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
+      res.end(JSON.stringify({ error: 'rate limited' }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok after retry' } }] }));
+  });
+  await new Promise((resolve) => fakeApi.listen(0, resolve));
+  const port = fakeApi.address().port;
+
+  const provider = createProvider({ provider: 'openai', baseURL: `http://localhost:${port}`, apiKey: 'test', model: 'test-model' });
+  const start = Date.now();
+  const reply = await provider.chat({ system: 'sys', user: 'hello' });
+  const elapsedMs = Date.now() - start;
+
+  fakeApi.close();
+
+  assert.equal(reply, 'ok after retry');
+  assert.equal(requestCount, 2);
+  // The header says wait 1s. If this instead used the generic exponential
+  // backoff (>=1500ms for the first retry), elapsed would exceed 1500ms.
+  assert.ok(elapsedMs < 1500, `expected the 1s Retry-After to be honored (elapsed ${elapsedMs}ms should be <1500ms)`);
+  assert.ok(elapsedMs >= 900, `expected roughly a 1s wait, got ${elapsedMs}ms (too fast — header may have been ignored)`);
+  console.log(`✓ a 429 with Retry-After: 1 is honored as a ~1s wait (actual: ${elapsedMs}ms), then succeeds`);
 }
 
 main().catch((err) => {

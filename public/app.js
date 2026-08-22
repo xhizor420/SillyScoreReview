@@ -50,6 +50,7 @@ const els = {
   refreshModelsBtn: document.getElementById('refreshModelsBtn'),
   settingsModelCustom: document.getElementById('settingsModelCustom'),
   settingsConcurrency: document.getElementById('settingsConcurrency'),
+  concurrencyHint: document.getElementById('concurrencyHint'),
   saveSettingsBtn: document.getElementById('saveSettingsBtn'),
   settingsMsg: document.getElementById('settingsMsg'),
 };
@@ -439,6 +440,7 @@ async function openSettings() {
     els.settingsApiKey.value = '';
     els.settingsModelSelect.innerHTML = `<option value="">— save settings, then Refresh list —</option>`;
     els.settingsMsg.textContent = '';
+    els.concurrencyHint.textContent = settingsPresets[data.provider]?.rateLimitNote || '';
   } catch (err) {
     els.settingsMsg.textContent = `Could not load settings: ${err.message}`;
   }
@@ -465,6 +467,7 @@ els.settingsProvider.addEventListener('change', () => {
   const preset = settingsPresets[els.settingsProvider.value];
   if (preset) els.settingsBaseUrl.value = preset.baseURL;
   els.settingsModelSelect.innerHTML = `<option value="">— save settings, then Refresh list —</option>`;
+  els.concurrencyHint.textContent = preset?.rateLimitNote || '';
 });
 
 els.settingsModelSelect.addEventListener('change', () => {

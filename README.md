@@ -33,9 +33,13 @@ Settings/folder pickers mean you never actually need to hand-edit `config.json`.
 
 1. `scan` reads every `.png`/`.json` character card in a folder, extracts the embedded
    card data (SillyTavern V1/V2/V3 spec), sends each non-empty field to the LLM with
-   the rubric below, and caches the structured result in `data/cache.json`. Already-
-   scored cards are skipped on the next run unless the card file changed (content hash)
-   or you pass `--rescore`.
+   the rubric below, and caches the structured result to disk (`data/cache-*.json`)
+   **immediately after each card**, not just at the end — so if you stop it partway
+   through, everything scored so far is already saved. Successfully-scored cards are
+   skipped on the next run unless the card file changed (content hash) or you pass
+   `--rescore`; a card that **failed** (network error, bad response, rate limit
+   exhausted) is *not* skipped — it's automatically retried the next time you run `scan`
+   or click "Scan unscored," no flag needed.
 2. `serve` starts a local dashboard (`http://localhost:4180`) where you see every card's
    thumbnail and score at a glance, sort/filter by score or token count, open a card for
    the full breakdown, and delete (→ trash, reversible) or bulk-delete cards you decide
@@ -91,9 +95,15 @@ model) and **Change folder** button (your characters folder) instead of hand-edi
   endpoint (e.g. `http://localhost:11434/v1` for Ollama).
 - **Model** — after saving, click **Refresh list** to pull the live list of models your
   key/provider actually has access to, or type a model name manually.
-- **Parallel requests** — how many cards to score at once. Keep this low (2-4) for hosted
-  APIs to stay under rate limits; local models can usually go higher if your hardware
-  can take it.
+- **Parallel requests** — how many cards to score at once (default 5). For NanoGPT
+  specifically: their documented per-key limits are 10 concurrent requests and 60
+  requests/minute ([docs.nano-gpt.com](https://docs.nano-gpt.com/api-reference/miscellaneous/rate-limits)),
+  so **6-8 is a fast, safe setting** — going at or above 10 doesn't score any faster, it
+  just trades local queueing for the provider's own 429 responses. A 429 with a
+  `Retry-After` header is honored exactly (not guessed at with generic backoff), so
+  occasional rate-limit hits self-correct automatically rather than failing the card.
+  For other hosted APIs, check their limits before pushing much past 5; local models can
+  usually go higher if your hardware can take it.
 
 (If you'd rather configure by hand: same fields, in `config.json` — `charactersDir`,
 `provider`, `model`, `apiKey`, `baseURL`, `concurrency`. You can also set
