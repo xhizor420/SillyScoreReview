@@ -95,7 +95,7 @@ model) and **Change folder** button (your characters folder) instead of hand-edi
   endpoint (e.g. `http://localhost:11434/v1` for Ollama).
 - **Model** — after saving, click **Refresh list** to pull the live list of models your
   key/provider actually has access to, or type a model name manually.
-- **Parallel requests** — how many cards to score at once (default 5). For NanoGPT
+- **Parallel requests** — how many cards to score at once (default 8). For NanoGPT
   specifically: their documented per-key limits are 10 concurrent requests and 60
   requests/minute ([docs.nano-gpt.com](https://docs.nano-gpt.com/api-reference/miscellaneous/rate-limits)),
   so **6-8 is a fast, safe setting** — going at or above 10 doesn't score any faster, it

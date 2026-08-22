@@ -8,7 +8,7 @@
   "apiKey": "",
   "baseURL": "https://nano-gpt.com/api/v1",
 
-  "concurrency": 5,
+  "concurrency": 8,
   "port": 4180,
   "host": "0.0.0.0",
   "authToken": "",

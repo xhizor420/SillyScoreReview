@@ -17,7 +17,7 @@ const DEFAULT_CONFIG = {
   model: undefined,
   apiKey: undefined,
   baseURL: undefined,
-  concurrency: 5,
+  concurrency: 8,
   weights: DEFAULT_WEIGHTS,
   port: 4180,
   host: '0.0.0.0',
