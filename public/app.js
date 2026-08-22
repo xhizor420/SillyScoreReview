@@ -29,7 +29,19 @@ const els = {
   modalBackdrop: document.getElementById('modalBackdrop'),
   modalBody: document.getElementById('modalBody'),
   modalClose: document.getElementById('modalClose'),
+  folderBtn: document.getElementById('folderBtn'),
+  folderPanel: document.getElementById('folderPanel'),
+  closeFolderBtn: document.getElementById('closeFolderBtn'),
+  folderPathInput: document.getElementById('folderPathInput'),
+  folderGoBtn: document.getElementById('folderGoBtn'),
+  folderHomeBtn: document.getElementById('folderHomeBtn'),
+  folderUpBtn: document.getElementById('folderUpBtn'),
+  folderInfo: document.getElementById('folderInfo'),
+  folderList: document.getElementById('folderList'),
+  useFolderBtn: document.getElementById('useFolderBtn'),
 };
+
+let currentBrowse = null; // last successful /api/browse response, for "Use this folder" / "Up"
 
 function scoreClass(score, error) {
   if (error) return 'score-error';
@@ -40,8 +52,36 @@ function scoreClass(score, error) {
   return 'score-weak';
 }
 
-async function api(url, options) {
-  const res = await fetch(url, options);
+function getAuthToken() {
+  try {
+    return localStorage.getItem('ssr_token') || '';
+  } catch {
+    return '';
+  }
+}
+
+function setAuthToken(token) {
+  try {
+    localStorage.setItem('ssr_token', token);
+  } catch {
+    // localStorage unavailable (e.g. private browsing) — token just won't persist across reloads
+  }
+}
+
+async function api(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const token = getAuthToken();
+  if (token) headers['x-auth-token'] = token;
+
+  let res = await fetch(url, { ...options, headers });
+  if (res.status === 401) {
+    const entered = prompt('This dashboard is protected with an access token (set as "authToken" in config.json). Enter it:');
+    if (entered) {
+      setAuthToken(entered);
+      headers['x-auth-token'] = entered;
+      res = await fetch(url, { ...options, headers });
+    }
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error || `Request failed: ${res.status}`);
   return json;
@@ -312,6 +352,59 @@ els.emptyTrashBtn.addEventListener('click', async () => {
   if (!confirm('Permanently delete everything in trash? This cannot be undone.')) return;
   await api('/api/trash/empty', { method: 'POST' });
   await loadTrash();
+});
+
+async function browseFolder(targetPath) {
+  const qs = targetPath ? `?path=${encodeURIComponent(targetPath)}` : '';
+  try {
+    const data = await api(`/api/browse${qs}`);
+    currentBrowse = data;
+    els.folderPathInput.value = data.path;
+    els.folderInfo.textContent = `${data.cardCount} card file${data.cardCount === 1 ? '' : 's'} directly in this folder`;
+    els.folderList.innerHTML = '';
+    for (const dir of data.dirs) {
+      const li = document.createElement('li');
+      li.textContent = `📁 ${dir.name}`;
+      li.addEventListener('click', () => browseFolder(dir.path));
+      els.folderList.appendChild(li);
+    }
+  } catch (err) {
+    els.folderInfo.textContent = err.message;
+  }
+}
+
+els.folderBtn.addEventListener('click', async () => {
+  els.folderPanel.classList.remove('hidden');
+  await browseFolder(els.dirLabel.textContent || undefined);
+});
+els.closeFolderBtn.addEventListener('click', () => els.folderPanel.classList.add('hidden'));
+els.folderGoBtn.addEventListener('click', () => browseFolder(els.folderPathInput.value.trim()));
+els.folderPathInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') browseFolder(els.folderPathInput.value.trim());
+});
+els.folderHomeBtn.addEventListener('click', async () => {
+  const data = await api('/api/browse');
+  browseFolder(data.home);
+});
+els.folderUpBtn.addEventListener('click', () => {
+  if (currentBrowse?.parent) browseFolder(currentBrowse.parent);
+});
+els.useFolderBtn.addEventListener('click', async () => {
+  if (!currentBrowse) return;
+  try {
+    const data = await api('/api/settings/characters-dir', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: currentBrowse.path }),
+    });
+    els.folderPanel.classList.add('hidden');
+    await loadCards();
+    if (!data.persisted) {
+      alert(`Folder switched for this session, but couldn't save it to config.json (${data.persistError}). You'll need to pick it again next time you start the server, or set "charactersDir" in config.json yourself.`);
+    }
+  } catch (err) {
+    alert(`Could not switch folder: ${err.message}`);
+  }
 });
 
 els.modalClose.addEventListener('click', closeModal);

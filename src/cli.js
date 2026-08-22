@@ -20,6 +20,8 @@ const DEFAULT_CONFIG = {
   concurrency: 3,
   weights: DEFAULT_WEIGHTS,
   port: 4180,
+  host: '0.0.0.0',
+  authToken: '',
 };
 
 function parseArgs(argv) {
@@ -65,10 +67,15 @@ async function loadConfig(args) {
   if (args['base-url']) config.baseURL = args['base-url'];
   if (args.concurrency) config.concurrency = Number(args.concurrency);
   if (args.port) config.port = Number(args.port);
+  if (args.host) config.host = args.host;
+  if (args['auth-token']) config.authToken = args['auth-token'];
 
   config.charactersDir = path.resolve(process.cwd(), config.charactersDir);
   config.cacheFile = path.resolve(process.cwd(), config.cacheFile);
   config.trashDir = path.resolve(process.cwd(), config.trashDir);
+  // Kept so the dashboard can persist a folder picked at runtime back to the
+  // same file it was loaded from (or create one, if it didn't exist yet).
+  config.configPath = configPath;
 
   return config;
 }

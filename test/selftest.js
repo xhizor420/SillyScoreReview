@@ -113,7 +113,14 @@ async function main() {
 
   // quick server smoke test: list + fetch one card detail + image bytes
   const { startServer } = await import('../src/server.js');
-  const resolvedConfig = { ...config, charactersDir, cacheFile, trashDir, weights: (await import('../src/scorer.js')).DEFAULT_WEIGHTS };
+  const resolvedConfig = {
+    ...config,
+    charactersDir,
+    cacheFile,
+    trashDir,
+    configPath,
+    weights: (await import('../src/scorer.js')).DEFAULT_WEIGHTS,
+  };
   const server = await startServer(resolvedConfig);
   try {
     const listRes = await fetch('http://localhost:4180/api/cards');
@@ -129,6 +136,43 @@ async function main() {
     const imgRes = await fetch('http://localhost:4180/api/cards/good-card.png/image');
     assert.equal(imgRes.status, 200);
     console.log('✓ server serves the PNG thumbnail bytes');
+
+    // folder picker: browse to the parent dir and confirm it lists the characters folder
+    const browseRes = await fetch(`http://localhost:4180/api/browse?path=${encodeURIComponent(dir)}`);
+    const browse = await browseRes.json();
+    assert.ok(browse.dirs.some((d) => d.name === 'characters'));
+    console.log('✓ server /api/browse lists subdirectories for the folder picker');
+
+    // switch to a second characters folder and confirm it's a clean, isolated cache
+    const charactersDir2 = path.join(dir, 'characters2');
+    await mkdir(charactersDir2, { recursive: true });
+    await writeFile(path.join(charactersDir2, 'other-card.png'), buildFakePng({ ...goodCard, data: { ...goodCard.data, name: 'Other Folder Card' } }));
+
+    const switchRes = await fetch('http://localhost:4180/api/settings/characters-dir', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: charactersDir2 }),
+    });
+    const switchData = await switchRes.json();
+    assert.equal(switchData.persisted, true);
+    console.log('✓ server switches charactersDir and persists it to config.json');
+
+    const onDiskConfig = JSON.parse(await readFile(configPath, 'utf8'));
+    assert.equal(onDiskConfig.charactersDir, charactersDir2);
+    console.log('✓ config.json on disk reflects the newly picked folder');
+
+    const listAfterSwitchRes = await fetch('http://localhost:4180/api/cards');
+    const listAfterSwitch = await listAfterSwitchRes.json();
+    assert.equal(listAfterSwitch.cards.length, 1);
+    assert.equal(listAfterSwitch.cards[0].overallScore, null);
+    console.log('✓ switched folder shows its own (unscored) cards, not the previous folder\'s cache');
+
+    // switch back so the delete test below still targets the original two-card folder
+    await fetch('http://localhost:4180/api/settings/characters-dir', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: charactersDir }),
+    });
 
     const delRes = await fetch('http://localhost:4180/api/cards/delete', {
       method: 'POST',

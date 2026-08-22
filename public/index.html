@@ -33,6 +33,7 @@
   </select>
   <button id="scanUnscoredBtn">Scan unscored</button>
   <button id="rescanAllBtn" class="secondary">Rescore all</button>
+  <button id="folderBtn" class="secondary">Change folder</button>
   <button id="trashToggleBtn" class="secondary">Trash</button>
 </div>
 
@@ -60,6 +61,27 @@
     </div>
   </div>
   <ul id="trashList"></ul>
+</aside>
+
+<aside id="folderPanel" class="trash-panel hidden">
+  <div class="trash-header">
+    <h2>Choose characters folder</h2>
+    <button id="closeFolderBtn" class="secondary">Close</button>
+  </div>
+  <p class="folder-hint">Browse to the folder holding your SillyTavern card PNGs/JSON (e.g. <code>SillyTavern/data/default-user/characters</code>), or paste the full path directly.</p>
+  <div class="folder-path-row">
+    <input id="folderPathInput" type="text" placeholder="/path/to/characters" />
+    <button id="folderGoBtn">Go</button>
+  </div>
+  <div class="folder-path-row">
+    <button id="folderHomeBtn" class="secondary">Home</button>
+    <button id="folderUpBtn" class="secondary">Up one level</button>
+  </div>
+  <div id="folderInfo" class="folder-info"></div>
+  <ul id="folderList"></ul>
+  <div class="folder-actions">
+    <button id="useFolderBtn">Use this folder</button>
+  </div>
 </aside>
 
 <div id="modalBackdrop" class="modal-backdrop hidden">

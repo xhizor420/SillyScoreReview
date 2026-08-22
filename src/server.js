@@ -1,7 +1,8 @@
 import express from 'express';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { readFile, readdir, rename, unlink, stat, mkdir } from 'node:fs/promises';
+import os from 'node:os';
+import { randomUUID, createHash } from 'node:crypto';
+import { readFile, writeFile, readdir, rename, unlink, stat, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
@@ -24,8 +25,25 @@ function safeJoin(dir, name) {
 
 export async function startServer(config) {
   await mkdir(config.trashDir, { recursive: true });
-  const store = await new Store(config.cacheFile).load();
   const jobs = new Map();
+
+  // A scan/browse against one folder shouldn't see cached scores that
+  // belong to a same-named file in a folder you switched away from, so
+  // each characters folder the picker has pointed at gets its own cache
+  // file (auto-derived next to the configured one, keyed by folder path).
+  const initialDir = path.resolve(config.charactersDir);
+  const stores = new Map([[initialDir, await new Store(config.cacheFile).load()]]);
+  async function getStore(charactersDir) {
+    const key = path.resolve(charactersDir);
+    let store = stores.get(key);
+    if (!store) {
+      const hash = createHash('sha1').update(key).digest('hex').slice(0, 10);
+      const file = path.join(path.dirname(config.cacheFile), `cache-${hash}.json`);
+      store = await new Store(file).load();
+      stores.set(key, store);
+    }
+    return store;
+  }
 
   function cardSummary(file, entry) {
     return {
@@ -47,7 +65,7 @@ export async function startServer(config) {
     return { filePath, card, hash: hashCard(card) };
   }
 
-  async function scoreOne(file, provider) {
+  async function scoreOne(file, provider, store) {
     const { card, hash } = await readCardOrThrow(file);
     try {
       const result = await scoreCard(card, provider, { weights: config.weights });
@@ -81,6 +99,18 @@ export async function startServer(config) {
 
   const app = express();
   app.use(express.json());
+
+  // Optional shared-secret gate for the data API. Leave config.authToken empty
+  // for pure-localhost use; set it once this dashboard is reachable from other
+  // machines (e.g. over Tailscale) so a random device on your tailnet can't
+  // browse/delete your cards.
+  app.use('/api', (req, res, next) => {
+    if (!config.authToken) return next();
+    const provided = req.header('x-auth-token') || req.query.token;
+    if (provided === config.authToken) return next();
+    res.status(401).json({ error: 'Missing or invalid auth token' });
+  });
+
   app.use(express.static(PUBLIC_DIR));
 
   app.get('/api/cards', async (req, res) => {
@@ -93,14 +123,16 @@ export async function startServer(config) {
     } catch (err) {
       return res.status(500).json({ error: `Cannot read characters directory: ${err.message}` });
     }
+    const store = await getStore(config.charactersDir);
     const cards = files.map((file) => cardSummary(file, store.get(file)));
     res.json({ charactersDir: config.charactersDir, cards });
   });
 
   app.get('/api/cards/:id', async (req, res) => {
     const file = req.params.id;
-    const entry = store.get(file);
     try {
+      const store = await getStore(config.charactersDir);
+      const entry = store.get(file);
       const { card } = await readCardOrThrow(file);
       res.json({ id: file, name: card.name, fields: card.fields, tags: card.tags, entry: entry || null });
     } catch (err) {
@@ -120,8 +152,9 @@ export async function startServer(config) {
 
   app.post('/api/cards/:id/score', async (req, res) => {
     try {
+      const store = await getStore(config.charactersDir);
       const provider = createProvider(config);
-      const entry = await scoreOne(req.params.id, provider);
+      const entry = await scoreOne(req.params.id, provider, store);
       res.json({ id: req.params.id, entry });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -131,7 +164,9 @@ export async function startServer(config) {
   app.post('/api/score/batch', async (req, res) => {
     const { ids, scope = 'selected', limit, rescore = false } = req.body || {};
     let files;
+    let store;
     try {
+      store = await getStore(config.charactersDir);
       const all = (await readdir(config.charactersDir, { withFileTypes: true }))
         .filter((e) => e.isFile() && /\.(png|json)$/i.test(e.name))
         .map((e) => e.name)
@@ -173,7 +208,7 @@ export async function startServer(config) {
       }
       await runPool(files, config.concurrency, async (file) => {
         try {
-          const entry = await scoreOne(file, provider);
+          const entry = await scoreOne(file, provider, store);
           job.done++;
           job.results.push({ file, name: entry.name, overallScore: entry.result.overall_score });
         } catch (err) {
@@ -194,6 +229,7 @@ export async function startServer(config) {
 
   app.post('/api/cards/delete', async (req, res) => {
     const { ids = [] } = req.body || {};
+    const store = await getStore(config.charactersDir);
     const moved = [];
     const errors = [];
     for (const file of ids) {
@@ -266,12 +302,82 @@ export async function startServer(config) {
       provider: config.provider,
       model: config.model,
       concurrency: config.concurrency,
+      authRequired: Boolean(config.authToken),
     });
   });
 
+  // Server-side directory browser so the dashboard can offer a folder picker
+  // even when the browser and the filesystem are on different machines (e.g.
+  // you're at your desktop, the app and the cards are on a Tailscale-reachable
+  // Linux box hosting SillyTavern). Deliberately allows browsing anywhere the
+  // server process can read — see the authToken note above before exposing
+  // this beyond localhost/your own tailnet.
+  app.get('/api/browse', async (req, res) => {
+    let target = req.query.path ? String(req.query.path) : config.charactersDir || os.homedir();
+    target = path.resolve(target);
+    try {
+      const st = await stat(target);
+      if (!st.isDirectory()) throw new Error('Not a directory');
+    } catch (err) {
+      return res.status(400).json({ error: `Cannot open "${target}": ${err.message}` });
+    }
+    let entries;
+    try {
+      entries = await readdir(target, { withFileTypes: true });
+    } catch (err) {
+      return res.status(400).json({ error: `Cannot read "${target}": ${err.message}` });
+    }
+    const dirs = entries
+      .filter((e) => (e.isDirectory() || e.isSymbolicLink()) && !e.name.startsWith('.'))
+      .map((e) => ({ name: e.name, path: path.join(target, e.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const cardCount = entries.filter((e) => e.isFile() && /\.(png|json)$/i.test(e.name)).length;
+    const parent = path.dirname(target) !== target ? path.dirname(target) : null;
+    res.json({ path: target, parent, home: os.homedir(), cardCount, dirs });
+  });
+
+  app.post('/api/settings/characters-dir', async (req, res) => {
+    const target = path.resolve(String(req.body?.path || ''));
+    try {
+      const st = await stat(target);
+      if (!st.isDirectory()) throw new Error('Not a directory');
+    } catch (err) {
+      return res.status(400).json({ error: `Cannot use "${target}": ${err.message}` });
+    }
+
+    config.charactersDir = target;
+
+    let persisted = true;
+    let persistError = null;
+    try {
+      let onDisk = {};
+      try {
+        onDisk = JSON.parse(await readFile(config.configPath, 'utf8'));
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+      onDisk.charactersDir = target;
+      await mkdir(path.dirname(config.configPath), { recursive: true });
+      await writeFile(config.configPath, JSON.stringify(onDisk, null, 2));
+    } catch (err) {
+      persisted = false;
+      persistError = err.message;
+    }
+
+    res.json({ charactersDir: target, persisted, persistError });
+  });
+
   return new Promise((resolve) => {
-    const server = app.listen(config.port, () => {
-      console.log(`SillyScoreReview dashboard running at http://localhost:${config.port}`);
+    const server = app.listen(config.port, config.host || '0.0.0.0', () => {
+      const addr = server.address();
+      const displayHost = addr.address === '0.0.0.0' || addr.address === '::' ? 'localhost' : addr.address;
+      console.log(`SillyScoreReview dashboard running at http://${displayHost}:${config.port}`);
+      if (!config.host || config.host === '0.0.0.0') {
+        console.log(`Also reachable from any other machine that can route to this one (e.g. over Tailscale) at http://<this machine's address>:${config.port}`);
+        if (!config.authToken) {
+          console.log(`No authToken set in config — anyone who can reach this address can browse and delete cards. Set "authToken" in config.json before exposing this beyond localhost.`);
+        }
+      }
       console.log(`Characters directory: ${config.charactersDir}`);
       resolve(server);
     });

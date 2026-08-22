@@ -10,6 +10,8 @@
 
   "concurrency": 3,
   "port": 4180,
+  "host": "0.0.0.0",
+  "authToken": "",
 
   "weights": {
     "description": 0.3,

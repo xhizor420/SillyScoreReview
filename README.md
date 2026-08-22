@@ -122,7 +122,7 @@ node src/cli.js scan   [--dir PATH] [--limit N] [--rescore] [--dry-run]
                         [--provider anthropic|openai|local|mock] [--model NAME]
                         [--api-key KEY] [--base-url URL] [--concurrency N]
 node src/cli.js stats
-node src/cli.js serve  [--port 4180]
+node src/cli.js serve  [--port 4180] [--host 0.0.0.0] [--auth-token TOKEN]
 ```
 
 ## Safety notes
@@ -133,6 +133,70 @@ node src/cli.js serve  [--port 4180]
 - The scanner never modifies your card files, only reads them.
 - Nothing here talks to SillyTavern's server or database — it only reads the same PNG
   files from disk that SillyTavern reads. Safe to run while SillyTavern is running.
+
+## Picking the characters folder from the dashboard
+
+You don't have to hand-edit `config.json` to point at your cards. In the dashboard,
+click **Change folder** — it opens a server-side directory browser (click into
+subfolders, or paste a full path and hit Go) so you can navigate to wherever your
+`characters` folder actually lives and click **Use this folder**. This works even when
+the browser and the files are on different machines (see the Tailscale section below),
+since the browsing happens on the server, not in your browser.
+
+Picking a folder this way is saved back to `config.json` automatically, so it's still
+there next time you start `serve`. Each folder you've ever pointed at keeps its own score
+cache (`data/cache-<hash>.json`), so switching between e.g. two SillyTavern profiles never
+mixes up their scores, and switching back doesn't lose anything.
+
+## Running it against a SillyTavern box over Tailscale
+
+If SillyTavern (and your card files) live on a different machine than the one you're
+sitting at — e.g. a Linux box on your Tailscale network — the simplest setup is to run
+**SillyScoreReview directly on that Linux box**, since that's where the cards actually
+are on disk. The app doesn't need to know anything about Tailscale at all: Tailscale just
+gives that machine a private, encrypted, always-reachable address, and the app already
+listens on all network interfaces by default (`host: "0.0.0.0"` in the config), so it's
+automatically reachable at that address once it's running.
+
+On the Linux box hosting SillyTavern:
+
+```bash
+git clone <this repo> SillyScoreReview   # or copy the folder over however you like
+cd SillyScoreReview
+npm install
+cp config.example.json config.json
+# edit config.json: charactersDir -> SillyTavern's actual characters folder on this box,
+# e.g. /home/youruser/SillyTavern/data/default-user/characters
+node src/cli.js serve
+```
+
+Then from your desktop/phone/laptop anywhere else on your tailnet, open:
+
+```
+http://<linux-box-tailscale-name-or-ip>:4180
+```
+
+Find that name/IP with `tailscale status` on the Linux box, or check it in the Tailscale
+admin console. No port forwarding, no exposing anything to the public internet — only
+devices on your tailnet can reach it.
+
+A couple of things worth doing once you're serving beyond localhost:
+
+- **Set an access token.** Add `"authToken": "some-long-random-string"` to `config.json`
+  on the Linux box and restart `serve`. The dashboard will prompt for it once and remember
+  it in your browser. Without this, anyone who can reach that address on your tailnet
+  (any of your own devices, by default) can browse and delete your cards — fine if it's
+  just you, worth locking down if others share the tailnet.
+- **Keep it running after you disconnect.** `node src/cli.js serve` dies when your SSH
+  session ends unless you run it under `tmux`/`screen`, `nohup … &`, or (better, for
+  something long-lived) a `systemd` user service. A simple `pm2 start src/cli.js -- serve`
+  works too if you already have `pm2` installed.
+- **Firewall**, if the box runs one (e.g. `ufw`): allow the port only on the Tailscale
+  interface rather than opening it broadly — `sudo ufw allow in on tailscale0 to any port 4180`.
+
+You still run `scan` the same way on that box (or via the dashboard's "Scan unscored"),
+it just now has direct, fast local disk access to the real characters folder instead of
+going over the network for every card.
 
 ## Using this alongside SillyTavern
 
