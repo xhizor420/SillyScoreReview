@@ -13,7 +13,7 @@ const DEFAULT_CONFIG = {
   charactersDir: './characters',
   cacheFile: './data/cache.json',
   trashDir: './data/trash',
-  provider: 'anthropic',
+  provider: 'nanogpt',
   model: undefined,
   apiKey: undefined,
   baseURL: undefined,

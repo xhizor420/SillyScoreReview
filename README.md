@@ -10,6 +10,25 @@ card are judged the same way: does the writing actually work, is it specific, do
 give the model something to play. The prompt explicitly tells the model to call out
 padding and redundancy as weaknesses.
 
+## Windows quick start
+
+1. Install [Node.js](https://nodejs.org/) (the LTS installer — next, next, finish).
+2. Download/copy this project folder onto your PC.
+3. Double-click **`Start SillyScoreReview.bat`** in the folder. First run installs
+   dependencies and creates `config.json` automatically; it then opens a console window
+   (the server — leave it running) and your browser to `http://localhost:4180`.
+4. In the browser: click **Settings**, pick **NanoGPT** as the provider, paste your API
+   key from [nano-gpt.com](https://nano-gpt.com), click **Save settings**, then **Refresh
+   list** and pick a model from the dropdown, then **Save settings** again.
+5. Click **Change folder** and browse to wherever you put your card PNGs (e.g. your
+   SillyTavern `data/default-user/characters` folder). Click **Use this folder**.
+6. Click **Scan unscored**. Sort by **Score: low → high** once it's done to find your
+   worst cards first.
+
+Everything else below applies the same way on Windows, macOS, or Linux — the batch file
+is just a shortcut around the same `npm install` / `npm run serve` commands, and the
+Settings/folder pickers mean you never actually need to hand-edit `config.json`.
+
 ## How it works
 
 1. `scan` reads every `.png`/`.json` character card in a folder, extracts the embedded
@@ -50,30 +69,36 @@ whichever fields are present (weights in `config.json`, defaults favor `descript
 
 ## Setup
 
-Requires Node.js 18+.
+Requires Node.js 18+. On Windows, use `Start SillyScoreReview.bat` (see above) and skip
+straight to Usage — it handles all of this for you.
 
 ```bash
 npm install
 cp config.example.json config.json
+node src/cli.js serve
 ```
 
-Edit `config.json`:
+Then open `http://localhost:4180` and use the **Settings** panel (provider, API key,
+model) and **Change folder** button (your characters folder) instead of hand-editing
+`config.json` — both save back to the file automatically. Settings panel fields:
 
-- `charactersDir` — your SillyTavern characters folder. Typically
-  `SillyTavern/data/default-user/characters` (or `SillyTavern/data/<user>/characters` for
-  a specific profile — check the folder for your card PNGs to confirm).
-- `provider` — `anthropic`, `openai`, `local`, or `mock` (mock does no real analysis, it's
-  for testing the pipeline without spending anything).
-- `model` — e.g. `claude-sonnet-5` for Anthropic, `gpt-4o-mini` for OpenAI, or whatever
-  model name your local server expects.
-- `apiKey` — or leave blank and set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in your
-  environment instead (preferred, keeps the key out of the repo).
-- `baseURL` — only needed for `local`: point it at your OpenAI-compatible server, e.g.
-  `http://localhost:11434/v1` for Ollama, or your LM Studio / text-generation-webui
-  endpoint. No API key needed for most local servers.
-- `concurrency` — how many cards to score in parallel. Keep this low (2-4) for hosted
+- **Provider** — NanoGPT (default), Anthropic, OpenAI, or Local/other OpenAI-compatible
+  (Ollama, LM Studio, …), plus a Mock option that does no real analysis, for testing the
+  pipeline without spending anything.
+- **API key** — paste it in and Save; NanoGPT keys come from
+  [nano-gpt.com](https://nano-gpt.com). Not needed for most local servers.
+- **Base URL** — auto-filled per provider, editable if you're pointing at a non-default
+  endpoint (e.g. `http://localhost:11434/v1` for Ollama).
+- **Model** — after saving, click **Refresh list** to pull the live list of models your
+  key/provider actually has access to, or type a model name manually.
+- **Parallel requests** — how many cards to score at once. Keep this low (2-4) for hosted
   APIs to stay under rate limits; local models can usually go higher if your hardware
   can take it.
+
+(If you'd rather configure by hand: same fields, in `config.json` — `charactersDir`,
+`provider`, `model`, `apiKey`, `baseURL`, `concurrency`. You can also set
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` as environment variables instead of putting a key
+in the file.)
 
 ## Usage
 
@@ -119,7 +144,7 @@ All commands accept `--config path/to/other-config.json` if you want multiple pr
 
 ```
 node src/cli.js scan   [--dir PATH] [--limit N] [--rescore] [--dry-run]
-                        [--provider anthropic|openai|local|mock] [--model NAME]
+                        [--provider nanogpt|anthropic|openai|local|mock] [--model NAME]
                         [--api-key KEY] [--base-url URL] [--concurrency N]
 node src/cli.js stats
 node src/cli.js serve  [--port 4180] [--host 0.0.0.0] [--auth-token TOKEN]
@@ -149,6 +174,10 @@ cache (`data/cache-<hash>.json`), so switching between e.g. two SillyTavern prof
 mixes up their scores, and switching back doesn't lose anything.
 
 ## Running it against a SillyTavern box over Tailscale
+
+This section only applies if your cards live on a *different* machine than the one
+you're using the dashboard from. If you're running SillyScoreReview on the same Windows
+PC where you dropped your card files, skip this — just use the folder picker.
 
 If SillyTavern (and your card files) live on a different machine than the one you're
 sitting at — e.g. a Linux box on your Tailscale network — the simplest setup is to run

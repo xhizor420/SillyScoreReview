@@ -1,5 +1,48 @@
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+// Known providers with sane defaults, used both to fill in config.baseURL/model
+// when they're left blank and to drive the Settings panel in the dashboard.
+// NanoGPT (https://nano-gpt.com) is an OpenAI-compatible aggregator giving
+// access to many models through one API key, so it reuses the same client
+// code as `openai`/`local` — only the default base URL differs.
+export const PROVIDER_PRESETS = {
+  nanogpt: {
+    label: 'NanoGPT',
+    baseURL: 'https://nano-gpt.com/api/v1',
+    defaultModel: '',
+    needsKey: true,
+    docs: 'https://docs.nano-gpt.com',
+  },
+  anthropic: {
+    label: 'Anthropic (Claude)',
+    baseURL: 'https://api.anthropic.com',
+    defaultModel: 'claude-sonnet-5',
+    needsKey: true,
+    docs: 'https://console.anthropic.com',
+  },
+  openai: {
+    label: 'OpenAI',
+    baseURL: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    needsKey: true,
+    docs: 'https://platform.openai.com',
+  },
+  local: {
+    label: 'Local / other OpenAI-compatible (Ollama, LM Studio, …)',
+    baseURL: 'http://localhost:11434/v1',
+    defaultModel: '',
+    needsKey: false,
+    docs: '',
+  },
+  mock: {
+    label: 'Mock (offline test, no cost, no real scoring)',
+    baseURL: '',
+    defaultModel: 'mock-heuristic',
+    needsKey: false,
+    docs: '',
+  },
+};
+
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -69,14 +112,15 @@ function createAnthropicProvider(config) {
   };
 }
 
-/** Works for OpenAI itself, and any OpenAI-compatible local server (Ollama, LM Studio, text-generation-webui, vLLM, etc). */
-function createOpenAICompatProvider(config) {
+/** Works for OpenAI, NanoGPT, and any other OpenAI-compatible server (Ollama, LM Studio, text-generation-webui, vLLM, etc). */
+function createOpenAICompatProvider(config, name = 'openai-compatible') {
   const apiKey = config.apiKey || process.env.OPENAI_API_KEY || 'not-needed';
-  const model = config.model || 'gpt-4o-mini';
-  const baseURL = config.baseURL || 'https://api.openai.com/v1';
+  const model = config.model || PROVIDER_PRESETS[name]?.defaultModel || 'gpt-4o-mini';
+  const baseURL = config.baseURL || PROVIDER_PRESETS[name]?.baseURL || 'https://api.openai.com/v1';
+  if (!model) throw new Error(`No model set for provider "${name}" — pick one in Settings (Refresh model list, or type one in manually).`);
 
   return {
-    name: 'openai-compatible',
+    name,
     model,
     async chat({ system, user }) {
       return withRetries(async () => {
@@ -153,10 +197,44 @@ export function createProvider(config) {
     case 'openai':
     case 'local':
     case 'openai-compatible':
-      return createOpenAICompatProvider(config);
+    case 'nanogpt':
+      return createOpenAICompatProvider(config, config.provider === 'openai-compatible' ? 'openai' : config.provider);
     case 'mock':
       return createMockProvider();
     default:
-      throw new Error(`Unknown provider "${config.provider}". Use anthropic, openai, local, or mock.`);
+      throw new Error(`Unknown provider "${config.provider}". Use nanogpt, anthropic, openai, local, or mock.`);
   }
+}
+
+/** Lists model IDs available for the currently configured provider/key, for the Settings panel's model picker. */
+export async function listModels(config) {
+  if (config.provider === 'mock') return ['mock-heuristic'];
+
+  const preset = PROVIDER_PRESETS[config.provider];
+  const baseURL = config.baseURL || preset?.baseURL;
+  if (!baseURL) throw new Error(`No base URL configured for provider "${config.provider}"`);
+
+  if (config.provider === 'anthropic') {
+    const apiKey = config.apiKey || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error('No API key saved yet — save one in Settings first.');
+    const res = await fetchWithTimeout(
+      `${baseURL}/v1/models?limit=1000`,
+      { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } },
+      15_000,
+    );
+    if (!res.ok) throw new Error(`Model list request failed: ${res.status} ${(await res.text().catch(() => '')).slice(0, 300)}`);
+    const json = await res.json();
+    return (json.data || []).map((m) => m.id).sort();
+  }
+
+  const apiKey = config.apiKey || process.env.OPENAI_API_KEY || '';
+  if (!apiKey && preset?.needsKey) throw new Error('No API key saved yet — save one in Settings first.');
+  const res = await fetchWithTimeout(
+    `${baseURL}/models`,
+    { headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {} },
+    15_000,
+  );
+  if (!res.ok) throw new Error(`Model list request failed: ${res.status} ${(await res.text().catch(() => '')).slice(0, 300)}`);
+  const json = await res.json();
+  return (json.data || []).map((m) => m.id).sort();
 }

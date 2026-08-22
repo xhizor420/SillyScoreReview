@@ -3,10 +3,10 @@
   "cacheFile": "./data/cache.json",
   "trashDir": "./data/trash",
 
-  "provider": "anthropic",
-  "model": "claude-sonnet-5",
+  "provider": "nanogpt",
+  "model": "",
   "apiKey": "",
-  "baseURL": "",
+  "baseURL": "https://nano-gpt.com/api/v1",
 
   "concurrency": 3,
   "port": 4180,

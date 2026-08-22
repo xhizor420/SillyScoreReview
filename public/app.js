@@ -39,6 +39,19 @@ const els = {
   folderInfo: document.getElementById('folderInfo'),
   folderList: document.getElementById('folderList'),
   useFolderBtn: document.getElementById('useFolderBtn'),
+  settingsBtn: document.getElementById('settingsBtn'),
+  settingsPanel: document.getElementById('settingsPanel'),
+  closeSettingsBtn: document.getElementById('closeSettingsBtn'),
+  settingsProvider: document.getElementById('settingsProvider'),
+  apiKeyStatus: document.getElementById('apiKeyStatus'),
+  settingsApiKey: document.getElementById('settingsApiKey'),
+  settingsBaseUrl: document.getElementById('settingsBaseUrl'),
+  settingsModelSelect: document.getElementById('settingsModelSelect'),
+  refreshModelsBtn: document.getElementById('refreshModelsBtn'),
+  settingsModelCustom: document.getElementById('settingsModelCustom'),
+  settingsConcurrency: document.getElementById('settingsConcurrency'),
+  saveSettingsBtn: document.getElementById('saveSettingsBtn'),
+  settingsMsg: document.getElementById('settingsMsg'),
 };
 
 let currentBrowse = null; // last successful /api/browse response, for "Use this folder" / "Up"
@@ -407,12 +420,97 @@ els.useFolderBtn.addEventListener('click', async () => {
   }
 });
 
+let settingsPresets = {};
+
+async function openSettings() {
+  els.settingsPanel.classList.remove('hidden');
+  els.settingsMsg.textContent = 'Loading…';
+  try {
+    const data = await api('/api/settings');
+    settingsPresets = data.presets;
+    els.settingsProvider.innerHTML = Object.entries(settingsPresets)
+      .map(([key, p]) => `<option value="${key}">${escapeHtml(p.label)}</option>`)
+      .join('');
+    els.settingsProvider.value = data.provider;
+    els.settingsBaseUrl.value = data.baseURL || '';
+    els.settingsConcurrency.value = data.concurrency;
+    els.settingsModelCustom.value = data.model || '';
+    els.apiKeyStatus.textContent = data.apiKeySet ? '(a key is saved — leave blank to keep it)' : '(none saved yet)';
+    els.settingsApiKey.value = '';
+    els.settingsModelSelect.innerHTML = `<option value="">— save settings, then Refresh list —</option>`;
+    els.settingsMsg.textContent = '';
+  } catch (err) {
+    els.settingsMsg.textContent = `Could not load settings: ${err.message}`;
+  }
+}
+
+async function loadModelList(messagePrefix = '') {
+  els.settingsMsg.textContent = `${messagePrefix}Loading model list…`;
+  try {
+    const { models } = await api('/api/models');
+    els.settingsModelSelect.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+    if (els.settingsModelCustom.value && models.includes(els.settingsModelCustom.value)) {
+      els.settingsModelSelect.value = els.settingsModelCustom.value;
+    }
+    els.settingsMsg.textContent = `${messagePrefix}${models.length} model${models.length === 1 ? '' : 's'} available. Pick one above, or type a name manually.`;
+  } catch (err) {
+    els.settingsMsg.textContent = `${messagePrefix}Couldn't load the model list (${err.message}). Type the model name manually instead.`;
+  }
+}
+
+els.settingsBtn.addEventListener('click', openSettings);
+els.closeSettingsBtn.addEventListener('click', () => els.settingsPanel.classList.add('hidden'));
+
+els.settingsProvider.addEventListener('change', () => {
+  const preset = settingsPresets[els.settingsProvider.value];
+  if (preset) els.settingsBaseUrl.value = preset.baseURL;
+  els.settingsModelSelect.innerHTML = `<option value="">— save settings, then Refresh list —</option>`;
+});
+
+els.settingsModelSelect.addEventListener('change', () => {
+  if (els.settingsModelSelect.value) els.settingsModelCustom.value = els.settingsModelSelect.value;
+});
+
+els.refreshModelsBtn.addEventListener('click', () => loadModelList());
+
+els.saveSettingsBtn.addEventListener('click', async () => {
+  const body = {
+    provider: els.settingsProvider.value,
+    baseURL: els.settingsBaseUrl.value.trim(),
+    model: els.settingsModelCustom.value.trim(),
+    concurrency: Number(els.settingsConcurrency.value) || undefined,
+  };
+  if (els.settingsApiKey.value.trim()) body.apiKey = els.settingsApiKey.value.trim();
+
+  els.saveSettingsBtn.disabled = true;
+  try {
+    const data = await api('/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    els.settingsApiKey.value = '';
+    els.apiKeyStatus.textContent = '(a key is saved — leave blank to keep it)';
+    const savedMsg = data.persisted
+      ? 'Saved. '
+      : `Saved for this session only — couldn't write config.json (${data.persistError}). `;
+    await loadModelList(savedMsg);
+  } catch (err) {
+    els.settingsMsg.textContent = `Save failed: ${err.message}`;
+  } finally {
+    els.saveSettingsBtn.disabled = false;
+  }
+});
+
 els.modalClose.addEventListener('click', closeModal);
 els.modalBackdrop.addEventListener('click', (e) => {
   if (e.target === els.modalBackdrop) closeModal();
 });
 
-loadCards().catch((err) => {
-  els.emptyState.textContent = `Failed to load cards: ${err.message}`;
+loadCards().catch(async (err) => {
+  // Most likely first run: no charactersDir picked yet. Guide straight to the folder picker.
+  els.emptyState.textContent = `Couldn't read the characters folder yet (${err.message}). Use "Change folder" below to pick it.`;
   els.emptyState.classList.remove('hidden');
+  els.folderPanel.classList.remove('hidden');
+  await browseFolder();
 });

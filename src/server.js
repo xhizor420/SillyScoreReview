@@ -6,7 +6,7 @@ import { readFile, writeFile, readdir, rename, unlink, stat, mkdir } from 'node:
 import { fileURLToPath } from 'node:url';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
-import { createProvider } from './llmClient.js';
+import { createProvider, listModels, PROVIDER_PRESETS } from './llmClient.js';
 import { scoreCard } from './scorer.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
@@ -65,6 +65,19 @@ export async function startServer(config) {
     return { filePath, card, hash: hashCard(card) };
   }
 
+  /** Read-modify-write a patch of fields into config.json on disk, tolerating a missing file. */
+  async function persistConfigPatch(patch) {
+    let onDisk = {};
+    try {
+      onDisk = JSON.parse(await readFile(config.configPath, 'utf8'));
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    Object.assign(onDisk, patch);
+    await mkdir(path.dirname(config.configPath), { recursive: true });
+    await writeFile(config.configPath, JSON.stringify(onDisk, null, 2));
+  }
+
   async function scoreOne(file, provider, store) {
     const { card, hash } = await readCardOrThrow(file);
     try {
@@ -99,6 +112,7 @@ export async function startServer(config) {
 
   const app = express();
   app.use(express.json());
+  app.get('/favicon.ico', (req, res) => res.status(204).end());
 
   // Optional shared-secret gate for the data API. Leave config.authToken empty
   // for pure-localhost use; set it once this dashboard is reachable from other
@@ -296,14 +310,55 @@ export async function startServer(config) {
     }
   });
 
-  app.get('/api/config', (req, res) => {
+  app.get('/api/settings', (req, res) => {
     res.json({
-      charactersDir: config.charactersDir,
       provider: config.provider,
-      model: config.model,
+      model: config.model || '',
+      baseURL: config.baseURL || PROVIDER_PRESETS[config.provider]?.baseURL || '',
+      apiKeySet: Boolean(config.apiKey || process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY),
       concurrency: config.concurrency,
+      charactersDir: config.charactersDir,
       authRequired: Boolean(config.authToken),
+      presets: PROVIDER_PRESETS,
     });
+  });
+
+  app.post('/api/settings', async (req, res) => {
+    const { provider, model, baseURL, apiKey, concurrency } = req.body || {};
+    if (provider !== undefined) {
+      if (!PROVIDER_PRESETS[provider]) return res.status(400).json({ error: `Unknown provider "${provider}"` });
+      config.provider = provider;
+    }
+    if (model !== undefined) config.model = model;
+    if (baseURL !== undefined) config.baseURL = baseURL;
+    if (apiKey) config.apiKey = apiKey; // blank/omitted = keep whatever's already saved
+    if (concurrency) config.concurrency = Math.max(1, Number(concurrency));
+
+    let persisted = true;
+    let persistError = null;
+    try {
+      const patch = {};
+      if (provider !== undefined) patch.provider = provider;
+      if (model !== undefined) patch.model = model;
+      if (baseURL !== undefined) patch.baseURL = baseURL;
+      if (apiKey) patch.apiKey = apiKey;
+      if (concurrency) patch.concurrency = config.concurrency;
+      await persistConfigPatch(patch);
+    } catch (err) {
+      persisted = false;
+      persistError = err.message;
+    }
+
+    res.json({ ok: true, persisted, persistError });
+  });
+
+  app.get('/api/models', async (req, res) => {
+    try {
+      const models = await listModels(config);
+      res.json({ models });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Server-side directory browser so the dashboard can offer a folder picker
@@ -313,13 +368,21 @@ export async function startServer(config) {
   // server process can read — see the authToken note above before exposing
   // this beyond localhost/your own tailnet.
   app.get('/api/browse', async (req, res) => {
-    let target = req.query.path ? String(req.query.path) : config.charactersDir || os.homedir();
-    target = path.resolve(target);
+    let target = path.resolve(req.query.path ? String(req.query.path) : config.charactersDir || os.homedir());
     try {
       const st = await stat(target);
       if (!st.isDirectory()) throw new Error('Not a directory');
     } catch (err) {
-      return res.status(400).json({ error: `Cannot open "${target}": ${err.message}` });
+      // First run: the configured/default charactersDir may not exist yet — fall
+      // back to the user's home folder instead of just erroring out.
+      if (req.query.path) return res.status(400).json({ error: `Cannot open "${target}": ${err.message}` });
+      target = os.homedir();
+      try {
+        const st2 = await stat(target);
+        if (!st2.isDirectory()) throw new Error('Not a directory');
+      } catch (err2) {
+        return res.status(400).json({ error: `Cannot open "${target}": ${err2.message}` });
+      }
     }
     let entries;
     try {
@@ -350,15 +413,7 @@ export async function startServer(config) {
     let persisted = true;
     let persistError = null;
     try {
-      let onDisk = {};
-      try {
-        onDisk = JSON.parse(await readFile(config.configPath, 'utf8'));
-      } catch (err) {
-        if (err.code !== 'ENOENT') throw err;
-      }
-      onDisk.charactersDir = target;
-      await mkdir(path.dirname(config.configPath), { recursive: true });
-      await writeFile(config.configPath, JSON.stringify(onDisk, null, 2));
+      await persistConfigPatch({ charactersDir: target });
     } catch (err) {
       persisted = false;
       persistError = err.message;

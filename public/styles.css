@@ -211,3 +211,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 #folderList li { cursor: pointer; }
 #folderList li:hover { color: var(--accent); }
 .folder-actions { margin-top: 14px; display: flex; justify-content: flex-end; }
+
+.settings-field { margin-top: 14px; }
+.settings-field label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+.settings-field input, .settings-field select { width: 100%; }
+.settings-field .folder-path-row { margin-top: 0; }
+.settings-field .folder-path-row select { flex: 1; }
+#settingsModelCustom { margin-top: 6px; }

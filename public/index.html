@@ -34,6 +34,7 @@
   <button id="scanUnscoredBtn">Scan unscored</button>
   <button id="rescanAllBtn" class="secondary">Rescore all</button>
   <button id="folderBtn" class="secondary">Change folder</button>
+  <button id="settingsBtn" class="secondary">Settings</button>
   <button id="trashToggleBtn" class="secondary">Trash</button>
 </div>
 
@@ -82,6 +83,47 @@
   <div class="folder-actions">
     <button id="useFolderBtn">Use this folder</button>
   </div>
+</aside>
+
+<aside id="settingsPanel" class="trash-panel hidden">
+  <div class="trash-header">
+    <h2>LLM Settings</h2>
+    <button id="closeSettingsBtn" class="secondary">Close</button>
+  </div>
+
+  <div class="settings-field">
+    <label for="settingsProvider">Provider</label>
+    <select id="settingsProvider"></select>
+  </div>
+
+  <div class="settings-field">
+    <label for="settingsApiKey">API key <span id="apiKeyStatus" class="folder-hint"></span></label>
+    <input id="settingsApiKey" type="password" autocomplete="off" placeholder="Paste API key (leave blank to keep the saved one)" />
+  </div>
+
+  <div class="settings-field">
+    <label for="settingsBaseUrl">Base URL</label>
+    <input id="settingsBaseUrl" type="text" placeholder="https://…" />
+  </div>
+
+  <div class="settings-field">
+    <label for="settingsModelSelect">Model</label>
+    <div class="folder-path-row">
+      <select id="settingsModelSelect"><option value="">— save settings, then Refresh list —</option></select>
+      <button id="refreshModelsBtn" class="secondary">Refresh list</button>
+    </div>
+    <input id="settingsModelCustom" type="text" placeholder="or type the exact model name" />
+  </div>
+
+  <div class="settings-field">
+    <label for="settingsConcurrency">Parallel requests</label>
+    <input id="settingsConcurrency" type="number" min="1" max="20" />
+  </div>
+
+  <div class="folder-actions">
+    <button id="saveSettingsBtn">Save settings</button>
+  </div>
+  <p id="settingsMsg" class="folder-hint"></p>
 </aside>
 
 <div id="modalBackdrop" class="modal-backdrop hidden">

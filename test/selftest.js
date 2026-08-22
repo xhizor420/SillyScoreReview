@@ -137,6 +137,38 @@ async function main() {
     assert.equal(imgRes.status, 200);
     console.log('✓ server serves the PNG thumbnail bytes');
 
+    // settings panel: read current (mock) settings, list models, switch provider, persist
+    const settingsRes = await fetch('http://localhost:4180/api/settings');
+    const settings = await settingsRes.json();
+    assert.equal(settings.provider, 'mock');
+    assert.ok(settings.presets.nanogpt);
+    assert.equal(settings.presets.nanogpt.baseURL, 'https://nano-gpt.com/api/v1');
+    console.log('✓ server /api/settings reports current provider and includes the NanoGPT preset');
+
+    const modelsRes = await fetch('http://localhost:4180/api/models');
+    const modelsData = await modelsRes.json();
+    assert.deepEqual(modelsData.models, ['mock-heuristic']);
+    console.log('✓ server /api/models lists models for the current provider');
+
+    const saveSettingsRes = await fetch('http://localhost:4180/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'nanogpt', apiKey: 'test-key-123', model: 'some-model' }),
+    });
+    const saveSettings = await saveSettingsRes.json();
+    assert.equal(saveSettings.persisted, true);
+    const onDiskAfterSettings = JSON.parse(await readFile(configPath, 'utf8'));
+    assert.equal(onDiskAfterSettings.provider, 'nanogpt');
+    assert.equal(onDiskAfterSettings.apiKey, 'test-key-123');
+    console.log('✓ server /api/settings switches provider and persists provider/model/apiKey to config.json');
+
+    // switch back to mock so nothing below tries to hit the real network
+    await fetch('http://localhost:4180/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'mock' }),
+    });
+
     // folder picker: browse to the parent dir and confirm it lists the characters folder
     const browseRes = await fetch(`http://localhost:4180/api/browse?path=${encodeURIComponent(dir)}`);
     const browse = await browseRes.json();
