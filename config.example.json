@@ -1,0 +1,24 @@
+{
+  "charactersDir": "/path/to/SillyTavern/data/default-user/characters",
+  "cacheFile": "./data/cache.json",
+  "trashDir": "./data/trash",
+
+  "provider": "anthropic",
+  "model": "claude-sonnet-5",
+  "apiKey": "",
+  "baseURL": "",
+
+  "concurrency": 3,
+  "port": 4180,
+
+  "weights": {
+    "description": 0.3,
+    "personality": 0.1,
+    "scenario": 0.1,
+    "first_mes": 0.25,
+    "mes_example": 0.15,
+    "system_prompt": 0.05,
+    "post_history_instructions": 0.05,
+    "alternate_greetings": 0.0
+  }
+}

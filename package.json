@@ -1,0 +1,22 @@
+{
+  "name": "sillyscorereview",
+  "version": "1.0.0",
+  "description": "Score, browse, and clean up SillyTavern character cards using an LLM rubric.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "sillyscorereview": "src/cli.js"
+  },
+  "scripts": {
+    "scan": "node src/cli.js scan",
+    "serve": "node src/cli.js serve",
+    "stats": "node src/cli.js stats",
+    "selftest": "node test/selftest.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "license": "MIT"
+}
