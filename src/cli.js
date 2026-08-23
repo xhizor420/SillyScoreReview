@@ -147,6 +147,19 @@ async function cmdScan(args) {
 
   let done = 0;
   let errors = 0;
+  const runStartedAt = Date.now();
+  // Live throughput/ETA, so a slow run is obvious within minutes instead of
+  // after leaving it overnight and finding it barely moved.
+  const progress = () => {
+    const finished = done + errors;
+    const elapsedMin = (Date.now() - runStartedAt) / 60_000;
+    if (elapsedMin < 0.1 || finished === 0) return `[${finished}/${work.length}]`;
+    const perHour = finished / (elapsedMin / 60);
+    const remainingHours = (work.length - finished) / Math.max(perHour, 0.01);
+    const eta = remainingHours < 1 ? `${Math.round(remainingHours * 60)}m` : `${remainingHours.toFixed(1)}h`;
+    return `[${finished}/${work.length} · ${perHour.toFixed(0)}/hr · ETA ${eta}]`;
+  };
+
   await runPool(work, config.concurrency, async ({ file, card, hash }) => {
     try {
       const result = await scoreCard(card, provider, { weights: config.weights });
@@ -161,7 +174,7 @@ async function cmdScan(args) {
         error: null,
       });
       done++;
-      console.log(`[${done + errors}/${work.length}] ✓ ${card.name} — overall ${result.overall_score}/10  (${file})`);
+      console.log(`${progress()} ✓ ${card.name} — overall ${result.overall_score}/10  (${file})`);
     } catch (err) {
       errors++;
       await store.set(file, {
@@ -174,11 +187,15 @@ async function cmdScan(args) {
         result: null,
         error: err.message,
       });
-      console.error(`[${done + errors}/${work.length}] ✗ ${card.name} — ${err.message}  (${file})`);
+      console.error(`${progress()} ✗ ${card.name} — ${err.message}  (${file})`);
     }
   });
 
-  console.log(`\nDone. ${done} scored, ${errors} errors. Re-run scan to retry errors.`);
+  const totalMin = (Date.now() - runStartedAt) / 60_000;
+  console.log(`\nDone in ${totalMin < 60 ? `${totalMin.toFixed(1)} min` : `${(totalMin / 60).toFixed(1)} h`}. ${done} scored, ${errors} errors. Re-run scan to retry errors.`);
+  if (errors > done && errors > 2) {
+    console.log('\nMost cards failed. Run `node src/cli.js doctor` to find out why (it tests a few cards and explains the cause).');
+  }
 }
 
 async function cmdStats(args) {
@@ -225,6 +242,13 @@ async function main() {
     case 'serve':
       await cmdServe(args);
       break;
+    case 'doctor': {
+      const config = await loadConfig(args);
+      const { runDoctor } = await import('./doctor.js');
+      const { ok } = await runDoctor(config);
+      if (!ok) process.exitCode = 1;
+      break;
+    }
     default:
       console.log(`SillyScoreReview — score & clean up SillyTavern character cards
 
@@ -232,6 +256,10 @@ Usage:
   node src/cli.js scan [--config config.json] [--dir <characters folder>] [--limit N] [--rescore] [--dry-run]
                         [--provider anthropic|openai|local|mock] [--model NAME] [--api-key KEY] [--base-url URL]
                         [--concurrency N]
+  node src/cli.js doctor [--config config.json]
+        Tests a few real cards against your API and explains what is slow or failing.
+        Run this FIRST if a scan is crawling.
+
   node src/cli.js stats [--config config.json]
   node src/cli.js serve [--config config.json] [--port 4180]
 

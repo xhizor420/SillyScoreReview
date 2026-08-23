@@ -286,20 +286,54 @@ function escapeHtml(str) {
 
 async function pollJob(jobId) {
   els.progressBar.classList.remove('hidden');
+  const startedAt = Date.now();
+  let lastGridRefresh = 0;
+
   while (true) {
     const job = await api(`/api/score/batch/${jobId}`);
-    const pct = job.total ? Math.round(((job.done + job.errors) / job.total) * 100) : 100;
+    const finished = job.done + job.errors;
+    const pct = job.total ? Math.round((finished / job.total) * 100) : 100;
     els.progressFill.style.width = `${pct}%`;
-    els.progressLabel.textContent = `Scoring ${job.done + job.errors}/${job.total} (${job.errors} errors)`;
+
+    // Report scored and failed separately — counting failures as "progress"
+    // hides a run that is churning without actually scoring anything.
+    const elapsedMin = (Date.now() - startedAt) / 60000;
+    let label = `Scored ${job.done}/${job.total}`;
+    if (job.errors) label += ` · ${job.errors} FAILED`;
+    if (elapsedMin > 0.3 && finished > 0) {
+      const perHour = finished / (elapsedMin / 60);
+      const etaH = (job.total - finished) / Math.max(perHour, 0.01);
+      label += ` · ${perHour.toFixed(0)}/hr · ETA ${etaH < 1 ? `${Math.round(etaH * 60)}m` : `${etaH.toFixed(1)}h`}`;
+    }
+    els.progressLabel.textContent = label;
+
     if (job.status !== 'running') {
       if (job.fatalError) alert(`Batch scoring failed to start: ${job.fatalError}`);
       break;
     }
+
     await new Promise((r) => setTimeout(r, 1500));
-    await loadCards();
+
+    // Rebuilding the whole grid re-requests every thumbnail. At a few thousand
+    // cards that starved the server's scoring pool, so refresh it sparingly
+    // while a job runs — the progress line above is the live feedback.
+    if (Date.now() - lastGridRefresh > 20000) {
+      lastGridRefresh = Date.now();
+      await loadCards();
+    }
   }
+
   els.progressBar.classList.add('hidden');
   await loadCards();
+
+  const job = await api(`/api/score/batch/${jobId}`).catch(() => null);
+  if (job && job.errors > 0 && job.errors >= job.done) {
+    alert(
+      `${job.errors} of ${job.done + job.errors} cards FAILED to score.\n\n` +
+      `This usually means the model is too slow (requests timing out) or is returning ` +
+      `unusable output.\n\nRun this in a terminal to find out exactly why:\n\n    node src/cli.js doctor`,
+    );
+  }
 }
 
 async function startBatch(body) {

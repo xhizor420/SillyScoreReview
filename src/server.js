@@ -158,6 +158,17 @@ export async function startServer(config) {
     try {
       const filePath = safeJoin(config.charactersDir, req.params.id);
       if (!/\.png$/i.test(filePath)) return res.status(204).end();
+
+      // Card art never changes unless the file does, so let the browser cache it.
+      // Without this every grid re-render refetched every thumbnail — with a few
+      // thousand cards that's hundreds of full-file reads per second competing
+      // with the scoring pool on the same single-threaded server.
+      const st = await stat(filePath);
+      const etag = `W/"${st.size}-${st.mtimeMs}"`;
+      res.set('ETag', etag);
+      res.set('Cache-Control', 'private, max-age=300');
+      if (req.headers['if-none-match'] === etag) return res.status(304).end();
+
       res.type('png').send(await readFile(filePath));
     } catch (err) {
       res.status(404).json({ error: err.message });

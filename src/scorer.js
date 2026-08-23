@@ -48,6 +48,11 @@ exactly this shape:
 }
 Include an entry in "fields" for every field given to you below, using the exact field name shown.`;
 
+/** The exact system+user prompt pair a real scan sends, so diagnostics can reuse it verbatim. */
+export function buildScoringPrompts(card, weights = DEFAULT_WEIGHTS) {
+  return { system: SYSTEM_PROMPT, user: buildUserPrompt(card, weights) };
+}
+
 function buildUserPrompt(card, weights) {
   const parts = [`Character name: ${card.name}`, ''];
   for (const field of SCORABLE_FIELDS) {
@@ -120,9 +125,21 @@ text field to one short sentence so the full response fits comfortably.`,
     parsed = extractJsonBlock(raw);
   }
 
-  if (!parsed || typeof parsed.fields !== 'object') {
+  const result = parseScoreResponse(raw, weights);
+  if (!result) {
     throw new Error('Model did not return parseable JSON after retry');
   }
+  return result;
+}
+
+/**
+ * Turns a raw model response into a normalized score result, or null if it
+ * isn't usable. Exported so diagnostics can check a single response without
+ * running the full retry cycle.
+ */
+export function parseScoreResponse(raw, weights = DEFAULT_WEIGHTS) {
+  const parsed = extractJsonBlock(raw);
+  if (!parsed || typeof parsed.fields !== 'object') return null;
 
   // Normalize/clamp scores defensively; models occasionally drift from the schema.
   const fields = {};

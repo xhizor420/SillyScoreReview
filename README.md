@@ -10,6 +10,27 @@ card are judged the same way: does the writing actually work, is it specific, do
 give the model something to play. The prompt explicitly tells the model to call out
 padding and redundancy as weaknesses.
 
+## Scan crawling? Run `doctor` first
+
+If a scan is going slowly, don't wait it out — run:
+
+```
+node src/cli.js doctor
+```
+
+It scores three real cards from your folder (smallest / median / largest) with full
+instrumentation and tells you in about a minute what's wrong: whether requests are
+timing out, whether the model's replies are being cut off mid-JSON, how long each
+request actually takes, and roughly how long your whole folder would take at that
+speed. **Model choice is by far the biggest speed lever — much more than concurrency.**
+A fast model answers in 2-10s; a large "reasoning"/"thinking" model can take minutes per
+card and spend its whole output budget thinking instead of producing the JSON, which
+fails the card *and* costs a retry.
+
+Also worth knowing: `stats` shows how many cards actually **scored** versus **errored**.
+A progress bar that's climbing isn't proof things are working — failures count as
+processed too.
+
 ## Windows quick start
 
 1. Install [Node.js](https://nodejs.org/) (the LTS installer — next, next, finish).
@@ -156,9 +177,15 @@ All commands accept `--config path/to/other-config.json` if you want multiple pr
 node src/cli.js scan   [--dir PATH] [--limit N] [--rescore] [--dry-run]
                         [--provider nanogpt|anthropic|openai|local|mock] [--model NAME]
                         [--api-key KEY] [--base-url URL] [--concurrency N]
+node src/cli.js doctor          # diagnose why a scan is slow or failing
 node src/cli.js stats
 node src/cli.js serve  [--port 4180] [--host 0.0.0.0] [--auth-token TOKEN]
 ```
+
+`timeoutMs` in `config.json` (default 120000) caps how long a single request may take.
+A request that times out is retried only once, then the card is marked failed and picked
+up by the next scan — so a slow model degrades throughput rather than silently stalling
+for tens of minutes per card.
 
 ## Safety notes
 

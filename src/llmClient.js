@@ -52,6 +52,19 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      // Mark timeouts distinctly. Retrying an identical request that was too
+      // slow rarely helps — it just burns another full timeout — so the retry
+      // policy treats these very differently from a transient 500.
+      const timeoutErr = new Error(
+        `Request timed out after ${Math.round(timeoutMs / 1000)}s. The model is likely too slow for this workload — ` +
+        `try a faster model, or raise "timeoutMs" in config.json if you want to wait longer.`,
+      );
+      timeoutErr.isTimeout = true;
+      throw timeoutErr;
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -70,6 +83,7 @@ function parseRetryAfterMs(res) {
 
 async function withRetries(fn, { retries = 4, baseDelayMs = 1500 } = {}) {
   let lastErr;
+  let timeoutsSeen = 0;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
@@ -77,6 +91,12 @@ async function withRetries(fn, { retries = 4, baseDelayMs = 1500 } = {}) {
       lastErr = err;
       const retriable = err.retriable !== false; // default: retry
       if (!retriable || attempt === retries) break;
+      // Timeouts get at most ONE retry, not the full ladder. A request that was
+      // too slow will almost always be too slow again, and each attempt costs a
+      // full timeout — 5 attempts at the 120s default is 10 wasted minutes for a
+      // card that then fails anyway. This was the dominant cost in a real slow
+      // scan: ~13x the timeout burned per card. One retry covers a genuine blip.
+      if (err.isTimeout && ++timeoutsSeen > 1) break;
       // A long Retry-After (tens of minutes+) usually means a daily quota reset,
       // not a transient rate limit — waiting it out would just block this worker
       // slot for hours, so surface the error now instead of stalling the batch.
@@ -142,42 +162,56 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
   const baseURL = config.baseURL || PROVIDER_PRESETS[name]?.baseURL || 'https://api.openai.com/v1';
   if (!model) throw new Error(`No model set for provider "${name}" — pick one in Settings (Refresh model list, or type one in manually).`);
 
+  async function call({ system, user, maxTokens }) {
+    return withRetries(async () => {
+      const startedAt = Date.now();
+      const res = await fetchWithTimeout(
+        `${baseURL}/chat/completions`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            temperature: config.temperature ?? 0.2,
+            max_tokens: maxTokens || config.maxTokens || 3000,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: user },
+            ],
+          }),
+        },
+        config.timeoutMs || DEFAULT_TIMEOUT_MS,
+      );
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        const err = new Error(`${name} API ${res.status}: ${body.slice(0, 500)}`);
+        err.retriable = res.status === 429 || res.status >= 500;
+        err.retryAfterMs = parseRetryAfterMs(res);
+        throw err;
+      }
+      const json = await res.json();
+      return {
+        content: json.choices?.[0]?.message?.content || '',
+        finishReason: json.choices?.[0]?.finish_reason ?? null,
+        usage: json.usage ?? null,
+        latencyMs: Date.now() - startedAt,
+      };
+    });
+  }
+
   return {
     name,
     model,
-    async chat({ system, user, maxTokens }) {
-      return withRetries(async () => {
-        const res = await fetchWithTimeout(
-          `${baseURL}/chat/completions`,
-          {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              authorization: `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify({
-              model,
-              temperature: config.temperature ?? 0.2,
-              max_tokens: maxTokens || config.maxTokens || 3000,
-              messages: [
-                { role: 'system', content: system },
-                { role: 'user', content: user },
-              ],
-            }),
-          },
-          config.timeoutMs || DEFAULT_TIMEOUT_MS,
-        );
-        if (!res.ok) {
-          const body = await res.text().catch(() => '');
-          const err = new Error(`${name} API ${res.status}: ${body.slice(0, 500)}`);
-          err.retriable = res.status === 429 || res.status >= 500;
-          err.retryAfterMs = parseRetryAfterMs(res);
-          throw err;
-        }
-        const json = await res.json();
-        return json.choices?.[0]?.message?.content || '';
-      });
+    baseURL,
+    async chat(args) {
+      return (await call(args)).content;
     },
+    // Same request, but returns timing/finish_reason/usage alongside the text —
+    // used by `doctor` to explain *why* a scan is slow or failing.
+    chatWithMeta: call,
   };
 }
 

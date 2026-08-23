@@ -248,8 +248,43 @@ async function main() {
 
   await testRetryAfterHonored();
   await testJsonRepairRetryGetsMoreTokens();
+  await testTimeoutRetriesOnlyOnce();
 
   console.log('\nAll self-tests passed.');
+}
+
+// A request that times out is almost always going to time out again — retrying
+// it on the full exponential ladder burned 5 x the timeout (10 minutes at the
+// 120s default) per card and still failed. This was the dominant cost in a real
+// 14-hour scan that processed only ~44 cards/hour. Cap timeout retries at one.
+async function testTimeoutRetriesOnlyOnce() {
+  let attempts = 0;
+  const hangingApi = createServer(() => {
+    attempts++;
+    // never respond — force the client-side timeout path
+  });
+  await new Promise((resolve) => hangingApi.listen(0, resolve));
+  const port = hangingApi.address().port;
+
+  const provider = createProvider({
+    provider: 'openai',
+    baseURL: `http://localhost:${port}`,
+    apiKey: 'test',
+    model: 'test-model',
+    timeoutMs: 400,
+  });
+
+  const start = Date.now();
+  await assert.rejects(() => provider.chat({ system: 'sys', user: 'hello' }), /timed out/i);
+  const elapsedMs = Date.now() - start;
+
+  hangingApi.closeAllConnections?.();
+  hangingApi.close();
+
+  assert.equal(attempts, 2, `expected 1 initial attempt + 1 retry, got ${attempts} attempts`);
+  // 2 attempts x 400ms + ~1.5s backoff. The old 5-attempt ladder would be >3.5s.
+  assert.ok(elapsedMs < 3500, `expected a capped timeout ladder, took ${elapsedMs}ms`);
+  console.log(`✓ a timing-out request retries only once (${attempts} attempts, ${elapsedMs}ms) instead of burning the full ladder`);
 }
 
 // A NanoGPT-style 429 with a Retry-After header must be honored as the actual
