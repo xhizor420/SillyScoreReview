@@ -8,6 +8,7 @@ import { createProvider, resolveConcurrency } from './llmClient.js';
 import { scoreCard, DEFAULT_WEIGHTS } from './scorer.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
+import { classifyError } from './errorKinds.js';
 
 const DEFAULT_CONFIG = {
   charactersDir: './characters',
@@ -207,21 +208,63 @@ async function cmdStats(args) {
   const store = await new Store(config.cacheFile).load();
   const entries = Object.values(store.all());
   const buckets = {};
+  const errorGroups = new Map();
   let sum = 0;
   let scored = 0;
+  let failed = 0;
+
   for (const e of entries) {
     const score = e.result?.overall_score ?? null;
     const bucket = e.error ? 'error' : scoreBucket(score);
     buckets[bucket] = (buckets[bucket] || 0) + 1;
+    if (e.error) {
+      failed++;
+      const kind = classifyError(e.error);
+      if (!errorGroups.has(kind)) errorGroups.set(kind, { count: 0, sample: e.error });
+      errorGroups.get(kind).count++;
+    }
     if (score != null) {
       sum += score;
       scored++;
     }
   }
+
+  const attempted = scored + failed;
   console.log(`Total cached entries: ${entries.length}`);
   console.log(`Scored successfully: ${scored}${scored ? `, average overall score: ${(sum / scored).toFixed(2)}` : ''}`);
+  if (attempted > 0) {
+    console.log(`Failed: ${failed} (${((failed / attempted) * 100).toFixed(0)}% of attempted)`);
+  }
+
+  console.log('\nScore distribution:');
   for (const [bucket, count] of Object.entries(buckets)) {
     console.log(`  ${bucket}: ${count}`);
+  }
+
+  if (errorGroups.size) {
+    console.log('\nWhy cards failed:');
+    const sorted = [...errorGroups.entries()].sort((a, b) => b[1].count - a[1].count);
+    for (const [kind, { count, sample }] of sorted) {
+      console.log(`  ${String(count).padStart(5)}  ${kind}`);
+      console.log(`         e.g. "${sample.slice(0, 130)}${sample.length > 130 ? '…' : ''}"`);
+    }
+    const top = sorted[0][0];
+    console.log('');
+    if (/timed out/.test(top)) {
+      console.log('Most failures are timeouts: the model is slower than the time limit.');
+      console.log('A timed-out request is now retried once at double the deadline, so re-running');
+      console.log('`scan` will recover many of these. If they still fail, the model is slower than');
+      console.log('2x your timeout — raise "timeoutMs" in Settings, or pick a faster model.');
+    } else if (/JSON/.test(top)) {
+      console.log('Most failures are unusable output, not speed. This usually means the model');
+      console.log('spends its output budget "thinking" instead of answering, or ignores the JSON');
+      console.log('format. Try a different (non-reasoning) model, or raise "maxTokens".');
+    } else if (/429|Rate limited/.test(top)) {
+      console.log('Most failures are rate limits. Lower "Requests per minute" in Settings.');
+    } else if (/Auth/.test(top)) {
+      console.log('Your API key is being rejected — re-enter it in Settings.');
+    }
+    console.log('\nRun `node src/cli.js doctor` to test a few cards live against your API.');
   }
 }
 

@@ -391,11 +391,23 @@ async function pollJob(jobId) {
   // it be dismissed now that nothing is streaming into it.
   els.hideScanPanelBtn.classList.remove('hidden');
 
-  if (job.errors > 0 && job.errors >= job.done) {
+  if (job.errors > 0) {
+    // Say *why* they failed rather than only how many — the fix for timeouts
+    // (slower model / longer deadline) is the opposite of the fix for unusable
+    // output (different model / more tokens).
+    let why = '';
+    try {
+      const f = await api('/api/failures');
+      if (f.groups?.length) {
+        why = '\n\nWhy they failed:\n' + f.groups.map((g) => `  ${g.count}x  ${g.kind}`).join('\n');
+      }
+    } catch {
+      // breakdown is a nicety; never let it swallow the main message
+    }
     alert(
-      `${job.errors} of ${job.done + job.errors} cards FAILED to score.\n\n` +
-      `This usually means the model is too slow (requests timing out) or is returning ` +
-      `unusable output.\n\nRun this in a terminal to find out exactly why:\n\n    node src/cli.js doctor`,
+      `${job.errors} of ${job.done + job.errors} cards failed to score.${why}\n\n` +
+      `Failed cards are not lost — "Scan unscored" retries them.\n\n` +
+      `For a live check against your API, run:  node src/cli.js doctor`,
     );
   }
 }

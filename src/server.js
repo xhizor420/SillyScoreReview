@@ -10,6 +10,7 @@ import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from
 import { scoreCard } from './scorer.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
+import { classifyError } from './errorKinds.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -372,6 +373,34 @@ export async function startServer(config) {
       const files = await readdir(config.trashDir);
       await Promise.all(files.map((f) => unlink(safeJoin(config.trashDir, f))));
       res.json({ deleted: files.length });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Grouped failure reasons for the whole cache, so the dashboard can explain
+  // *why* cards failed rather than only how many.
+  app.get('/api/failures', async (req, res) => {
+    try {
+      const store = await getStore(config.charactersDir);
+      const groups = new Map();
+      let failed = 0;
+      let scored = 0;
+      for (const entry of Object.values(store.all())) {
+        if (entry?.error) {
+          failed++;
+          const kind = classifyError(entry.error);
+          if (!groups.has(kind)) groups.set(kind, { kind, count: 0, sample: entry.error });
+          groups.get(kind).count++;
+        } else if (entry?.result) {
+          scored++;
+        }
+      }
+      res.json({
+        scored,
+        failed,
+        groups: [...groups.values()].sort((a, b) => b.count - a.count),
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
