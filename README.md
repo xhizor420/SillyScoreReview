@@ -162,11 +162,20 @@ Open `http://localhost:4180`. From there:
 - Filter to **Score below 4** to find likely-delete candidates immediately.
 - Click a card to read the full per-field breakdown (strengths/weaknesses/suggestions),
   the top 3 priority improvements, and the summary.
-- Select multiple cards (checkbox, top-left of each tile) and use **Delete selected** —
-  this moves the PNG/JSON files to `data/trash/`, it does not permanently delete them.
-  Use the **Trash** panel to restore a card or permanently empty the trash.
-- **Scan unscored** / **Rescore all** trigger a batch job in the background with a
-  progress bar; you can keep browsing while it runs.
+- **Culling bad cards in bulk:** filter to e.g. *Score below 4*, click **Select all
+  shown**, then **Delete selected**. The confirmation tells you how many cards, their
+  score range, and a sample of names before anything moves — so a mis-set filter is
+  obvious before it sweeps up good cards. You can still tick individual checkboxes
+  (top-left of each tile) for one-off picks.
+  Deleting moves the PNG/JSON files to `data/trash/`; it does not permanently delete
+  them. Use the **Trash** panel to restore a card or permanently empty the trash.
+- **Scan unscored** / **Rescore all** trigger a batch job in the background and open a
+  live panel showing: how many cards **scored** vs **failed** (counted separately, so a
+  failing run can't masquerade as a slow one), how many requests are **in flight** right
+  now out of your concurrency limit, the current **rate/hour**, **median** request time,
+  **ETA**, plus a list of which cards are being processed at this moment and a rolling
+  feed of what just finished with their scores. Requests sitting over 30s are flagged —
+  that's your cue that the model is too slow. You can keep browsing while it runs.
 
 All commands accept `--config path/to/other-config.json` if you want multiple profiles
 (e.g. different characters folders or providers).

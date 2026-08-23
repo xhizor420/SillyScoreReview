@@ -38,16 +38,34 @@
   <button id="trashToggleBtn" class="secondary">Trash</button>
 </div>
 
-<div id="progressBar" class="progress hidden">
-  <div class="progress-fill" id="progressFill"></div>
-  <span id="progressLabel"></span>
+<div id="scanPanel" class="scan-panel hidden">
+  <div class="progress">
+    <div class="progress-fill" id="progressFill"></div>
+    <span id="progressLabel"></span>
+  </div>
+  <div class="scan-head">
+    <div class="scan-stats" id="scanStats"></div>
+    <button id="hideScanPanelBtn" class="secondary hidden">Hide</button>
+  </div>
+  <div class="scan-columns">
+    <div>
+      <div class="scan-col-title">In flight now</div>
+      <ul id="scanActive" class="scan-list"></ul>
+    </div>
+    <div>
+      <div class="scan-col-title">Just finished</div>
+      <ul id="scanRecent" class="scan-list"></ul>
+    </div>
+  </div>
 </div>
 
-<div id="selectionBar" class="selection-bar hidden">
+<div class="selection-bar" id="selectionBar">
+  <span id="shownCount" class="shown-count"></span>
+  <button id="selectAllShownBtn" class="secondary">Select all shown</button>
   <span id="selectionCount"></span>
-  <button id="scoreSelectedBtn">Score selected</button>
-  <button id="deleteSelectedBtn" class="danger">Delete selected</button>
-  <button id="clearSelectionBtn" class="secondary">Clear</button>
+  <button id="scoreSelectedBtn" class="hidden">Score selected</button>
+  <button id="deleteSelectedBtn" class="danger hidden">Delete selected</button>
+  <button id="clearSelectionBtn" class="secondary hidden">Clear</button>
 </div>
 
 <main id="grid" class="grid"></main>

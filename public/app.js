@@ -1,5 +1,6 @@
 const state = {
   cards: [],
+  shown: [],
   selected: new Set(),
 };
 
@@ -14,11 +15,17 @@ const els = {
   scanUnscoredBtn: document.getElementById('scanUnscoredBtn'),
   rescanAllBtn: document.getElementById('rescanAllBtn'),
   trashToggleBtn: document.getElementById('trashToggleBtn'),
-  progressBar: document.getElementById('progressBar'),
+  scanPanel: document.getElementById('scanPanel'),
   progressFill: document.getElementById('progressFill'),
   progressLabel: document.getElementById('progressLabel'),
+  scanStats: document.getElementById('scanStats'),
+  hideScanPanelBtn: document.getElementById('hideScanPanelBtn'),
+  scanActive: document.getElementById('scanActive'),
+  scanRecent: document.getElementById('scanRecent'),
   selectionBar: document.getElementById('selectionBar'),
   selectionCount: document.getElementById('selectionCount'),
+  shownCount: document.getElementById('shownCount'),
+  selectAllShownBtn: document.getElementById('selectAllShownBtn'),
   scoreSelectedBtn: document.getElementById('scoreSelectedBtn'),
   deleteSelectedBtn: document.getElementById('deleteSelectedBtn'),
   clearSelectionBtn: document.getElementById('clearSelectionBtn'),
@@ -155,9 +162,11 @@ function renderGrid() {
   const query = els.search.value.trim().toLowerCase();
   let cards = state.cards.filter((c) => c.name.toLowerCase().includes(query) && passesFilter(c));
   cards = sortCards(cards);
+  state.shown = cards; // what "Select all shown" acts on
 
   els.grid.innerHTML = '';
   els.emptyState.classList.toggle('hidden', cards.length > 0);
+  renderSelectionBar();
 
   for (const card of cards) {
     const tile = document.createElement('div');
@@ -213,8 +222,18 @@ function renderGrid() {
 
 function renderSelectionBar() {
   const n = state.selected.size;
-  els.selectionBar.classList.toggle('hidden', n === 0);
-  els.selectionCount.textContent = `${n} selected`;
+  const shown = state.shown || [];
+  const allShownSelected = shown.length > 0 && shown.every((c) => state.selected.has(c.id));
+
+  els.shownCount.textContent = `${shown.length} card${shown.length === 1 ? '' : 's'} shown`;
+  els.selectAllShownBtn.textContent = allShownSelected ? 'Deselect all shown' : `Select all shown (${shown.length})`;
+  els.selectAllShownBtn.classList.toggle('hidden', shown.length === 0);
+
+  els.selectionCount.textContent = n ? `${n} selected` : '';
+  for (const btn of [els.scoreSelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]) {
+    btn.classList.toggle('hidden', n === 0);
+  }
+  els.deleteSelectedBtn.textContent = n ? `Delete selected (${n})` : 'Delete selected';
 }
 
 async function openCard(id) {
@@ -284,28 +303,68 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function fmtDuration(ms) {
+  if (ms == null) return '—';
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(0)}m`;
+  return `${(m / 60).toFixed(1)}h`;
+}
+
+function renderScanPanel(job) {
+  const finished = job.done + job.errors;
+  const pct = job.total ? Math.round((finished / job.total) * 100) : 100;
+  els.progressFill.style.width = `${pct}%`;
+  els.progressLabel.textContent = `${finished} / ${job.total} processed (${pct}%)`;
+
+  // Scored and failed are shown as separate figures on purpose: a run that is
+  // failing every card still advances the bar, which previously made a broken
+  // run look like a slow one.
+  const stats = [
+    { label: 'Scored', value: job.done, cls: 'is-ok' },
+    { label: 'Failed', value: job.errors, cls: job.errors ? 'is-error' : '' },
+    { label: 'In flight', value: `${job.inFlight}/${job.concurrency}` },
+    { label: 'Rate', value: job.perHour != null ? `${Math.round(job.perHour)}/hr` : '…' },
+    { label: 'Median', value: fmtDuration(job.medianLatencyMs) },
+    { label: 'ETA', value: job.status === 'running' ? fmtDuration(job.etaMs) : 'done' },
+    { label: 'Elapsed', value: fmtDuration(job.elapsedMs) },
+  ];
+  els.scanStats.innerHTML = stats
+    .map((s) => `<div class="scan-stat ${s.cls || ''}"><b>${escapeHtml(String(s.value))}</b><span>${escapeHtml(s.label)}</span></div>`)
+    .join('');
+
+  els.scanActive.innerHTML = job.active.length
+    ? job.active
+        .map((a) => {
+          // Flag requests that have been waiting a long time — the visible symptom
+          // of a model that's too slow, rather than silently sitting there.
+          const slow = a.elapsedMs > 30000;
+          return `<li><span>${escapeHtml(a.file)}</span><span class="${slow ? 'slow' : 'dim'}">${fmtDuration(a.elapsedMs)}${slow ? ' ⚠' : ''}</span></li>`;
+        })
+        .join('')
+    : '<li><span class="dim">idle</span></li>';
+
+  els.scanRecent.innerHTML = job.recent.length
+    ? job.recent
+        .map((r) =>
+          r.error
+            ? `<li><span title="${escapeHtml(r.error)}">${escapeHtml(r.file)}</span><span class="bad">failed ${fmtDuration(r.tookMs)}</span></li>`
+            : `<li><span>${escapeHtml(r.name || r.file)}</span><span class="ok">${r.overallScore}/10 · ${fmtDuration(r.tookMs)}</span></li>`,
+        )
+        .join('')
+    : '<li><span class="dim">nothing yet</span></li>';
+}
+
 async function pollJob(jobId) {
-  els.progressBar.classList.remove('hidden');
-  const startedAt = Date.now();
-  let lastGridRefresh = 0;
+  els.scanPanel.classList.remove('hidden');
+  els.hideScanPanelBtn.classList.add('hidden'); // only offered once the run ends
+  let lastGridRefresh = Date.now();
+  let job;
 
   while (true) {
-    const job = await api(`/api/score/batch/${jobId}`);
-    const finished = job.done + job.errors;
-    const pct = job.total ? Math.round((finished / job.total) * 100) : 100;
-    els.progressFill.style.width = `${pct}%`;
-
-    // Report scored and failed separately — counting failures as "progress"
-    // hides a run that is churning without actually scoring anything.
-    const elapsedMin = (Date.now() - startedAt) / 60000;
-    let label = `Scored ${job.done}/${job.total}`;
-    if (job.errors) label += ` · ${job.errors} FAILED`;
-    if (elapsedMin > 0.3 && finished > 0) {
-      const perHour = finished / (elapsedMin / 60);
-      const etaH = (job.total - finished) / Math.max(perHour, 0.01);
-      label += ` · ${perHour.toFixed(0)}/hr · ETA ${etaH < 1 ? `${Math.round(etaH * 60)}m` : `${etaH.toFixed(1)}h`}`;
-    }
-    els.progressLabel.textContent = label;
+    job = await api(`/api/score/batch/${jobId}`);
+    renderScanPanel(job);
 
     if (job.status !== 'running') {
       if (job.fatalError) alert(`Batch scoring failed to start: ${job.fatalError}`);
@@ -316,18 +375,20 @@ async function pollJob(jobId) {
 
     // Rebuilding the whole grid re-requests every thumbnail. At a few thousand
     // cards that starved the server's scoring pool, so refresh it sparingly
-    // while a job runs — the progress line above is the live feedback.
+    // while a job runs — the panel above is the live feedback.
     if (Date.now() - lastGridRefresh > 20000) {
       lastGridRefresh = Date.now();
       await loadCards();
     }
   }
 
-  els.progressBar.classList.add('hidden');
   await loadCards();
+  renderScanPanel(job);
+  // Leave the finished summary up so the run's outcome is reviewable, but let
+  // it be dismissed now that nothing is streaming into it.
+  els.hideScanPanelBtn.classList.remove('hidden');
 
-  const job = await api(`/api/score/batch/${jobId}`).catch(() => null);
-  if (job && job.errors > 0 && job.errors >= job.done) {
+  if (job.errors > 0 && job.errors >= job.done) {
     alert(
       `${job.errors} of ${job.done + job.errors} cards FAILED to score.\n\n` +
       `This usually means the model is too slow (requests timing out) or is returning ` +
@@ -379,15 +440,50 @@ els.rescanAllBtn.addEventListener('click', () => {
 
 els.scoreSelectedBtn.addEventListener('click', () => startBatch({ scope: 'selected', ids: [...state.selected], rescore: true }));
 els.deleteSelectedBtn.addEventListener('click', async () => {
-  if (!confirm(`Move ${state.selected.size} card(s) to trash?`)) return;
-  await api('/api/cards/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...state.selected] }) });
+  const ids = [...state.selected];
+  if (ids.length === 0) return;
+
+  // Deleting hundreds at once deserves more than a bare count — show the score
+  // range going out and a few names, so a mis-set filter is obvious before it
+  // sweeps away good cards.
+  const chosen = state.cards.filter((c) => state.selected.has(c.id));
+  const scores = chosen.map((c) => c.overallScore).filter((s) => s != null);
+  const scoreLine = scores.length
+    ? `Scores range ${Math.min(...scores)} – ${Math.max(...scores)}.`
+    : 'None of these have been scored yet.';
+  const sample = chosen.slice(0, 5).map((c) => `  • ${c.name}${c.overallScore != null ? ` (${c.overallScore}/10)` : ''}`).join('\n');
+  const more = chosen.length > 5 ? `\n  …and ${chosen.length - 5} more` : '';
+
+  if (!confirm(`Move ${ids.length} card${ids.length === 1 ? '' : 's'} to trash?\n\n${scoreLine}\n\n${sample}${more}\n\nThis moves the files to data/trash/ — you can restore them from the Trash panel.`)) return;
+
+  const res = await api('/api/cards/delete', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
   state.selected.clear();
-  renderSelectionBar();
   await loadCards();
+  if (res.errors?.length) {
+    alert(`Moved ${res.moved.length} to trash. ${res.errors.length} could not be moved:\n\n${res.errors.slice(0, 5).map((e) => `${e.file}: ${e.error}`).join('\n')}`);
+  }
 });
 els.clearSelectionBtn.addEventListener('click', () => {
   state.selected.clear();
-  renderSelectionBar();
+  renderGrid();
+});
+
+// The point of the filters is to isolate a group (e.g. "Score below 4") and act
+// on all of it at once — ticking several hundred checkboxes by hand is not a
+// workflow. This selects/deselects exactly what the current filter+search shows.
+els.hideScanPanelBtn.addEventListener('click', () => els.scanPanel.classList.add('hidden'));
+
+els.selectAllShownBtn.addEventListener('click', () => {
+  const shown = state.shown || [];
+  const allSelected = shown.length > 0 && shown.every((c) => state.selected.has(c.id));
+  for (const card of shown) {
+    if (allSelected) state.selected.delete(card.id);
+    else state.selected.add(card.id);
+  }
   renderGrid();
 });
 

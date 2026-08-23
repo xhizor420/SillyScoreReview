@@ -218,7 +218,22 @@ export async function startServer(config) {
     }
 
     const jobId = randomUUID();
-    const job = { id: jobId, total: files.length, done: 0, errors: 0, status: 'running', results: [], startedAt: new Date().toISOString() };
+    const job = {
+      id: jobId,
+      total: files.length,
+      done: 0,
+      errors: 0,
+      status: 'running',
+      results: [],
+      startedAt: new Date().toISOString(),
+      startedAtMs: Date.now(),
+      concurrency: config.concurrency,
+      model: config.model || null,
+      inFlight: 0,
+      active: [],       // cards currently awaiting a response, with elapsed time
+      recent: [],       // rolling feed of the last few completions
+      latencies: [],    // per-card wall time, for a live median
+    };
     jobs.set(jobId, job);
     res.json({ jobId, total: files.length });
 
@@ -232,13 +247,28 @@ export async function startServer(config) {
         return;
       }
       await runPool(files, config.concurrency, async (file) => {
+        const startedMs = Date.now();
+        job.inFlight++;
+        job.active.push({ file, startedMs });
+        const settle = (outcome) => {
+          job.inFlight--;
+          job.active = job.active.filter((a) => a.file !== file);
+          const tookMs = Date.now() - startedMs;
+          job.latencies.push(tookMs);
+          if (job.latencies.length > 200) job.latencies.shift();
+          job.recent.unshift({ ...outcome, file, tookMs });
+          if (job.recent.length > 12) job.recent.pop();
+        };
         try {
           const entry = await scoreOne(file, provider, store);
           job.done++;
-          job.results.push({ file, name: entry.name, overallScore: entry.result.overall_score });
+          const outcome = { name: entry.name, overallScore: entry.result.overall_score };
+          job.results.push({ file, ...outcome });
+          settle(outcome);
         } catch (err) {
           job.errors++;
           job.results.push({ file, error: err.message });
+          settle({ error: err.message });
         }
       });
       job.status = 'done';
@@ -249,7 +279,33 @@ export async function startServer(config) {
   app.get('/api/score/batch/:jobId', (req, res) => {
     const job = jobs.get(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Unknown job id' });
-    res.json(job);
+
+    const finished = job.done + job.errors;
+    const elapsedMs = Date.now() - job.startedAtMs;
+    const perHour = elapsedMs > 3000 && finished > 0 ? finished / (elapsedMs / 3_600_000) : null;
+    const sorted = [...job.latencies].sort((a, b) => a - b);
+    const medianMs = sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
+    const now = Date.now();
+
+    // Deliberately omits `results` (one entry per card — megabytes on a big run)
+    // since this is polled every couple of seconds.
+    res.json({
+      id: job.id,
+      status: job.status,
+      fatalError: job.fatalError ?? null,
+      total: job.total,
+      done: job.done,
+      errors: job.errors,
+      inFlight: job.inFlight,
+      concurrency: job.concurrency,
+      model: job.model,
+      elapsedMs,
+      perHour,
+      medianLatencyMs: medianMs,
+      etaMs: perHour && perHour > 0 ? ((job.total - finished) / perHour) * 3_600_000 : null,
+      active: job.active.map((a) => ({ file: a.file, elapsedMs: now - a.startedMs })),
+      recent: job.recent,
+    });
   });
 
   app.post('/api/cards/delete', async (req, res) => {
