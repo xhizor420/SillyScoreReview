@@ -247,6 +247,7 @@ async function main() {
   await rm(dir, { recursive: true, force: true });
 
   await testRetryAfterHonored();
+  await testJsonRepairRetryGetsMoreTokens();
 
   console.log('\nAll self-tests passed.');
 }
@@ -283,6 +284,46 @@ async function testRetryAfterHonored() {
   assert.ok(elapsedMs < 1500, `expected the 1s Retry-After to be honored (elapsed ${elapsedMs}ms should be <1500ms)`);
   assert.ok(elapsedMs >= 900, `expected roughly a 1s wait, got ${elapsedMs}ms (too fast — header may have been ignored)`);
   console.log(`✓ a 429 with Retry-After: 1 is honored as a ~1s wait (actual: ${elapsedMs}ms), then succeeds`);
+}
+
+// If a card's JSON response gets cut off (hitting max_tokens) rather than being
+// genuinely malformed, the repair retry must ask for MORE room, not resend the
+// same budget and get cut off identically. This was a real bug found by driving
+// the CLI against a fake provider that truncates: every affected card cost 2x
+// the latency and still failed. Guards against that regressing silently.
+async function testJsonRepairRetryGetsMoreTokens() {
+  const requestedMaxTokens = [];
+  const fakeApi = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const parsed = JSON.parse(body);
+      requestedMaxTokens.push(parsed.max_tokens);
+      const content =
+        requestedMaxTokens.length === 1
+          ? '{"fields": {"description": {"score": 7, "strengths": "cut off mid-strin' // truncated, invalid JSON
+          : JSON.stringify({ fields: { description: { score: 7, strengths: 'ok', weaknesses: 'ok', suggestions: 'ok' } }, overall_score: 7, top_priority_improvements: [], summary: 'ok' });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+  });
+  await new Promise((resolve) => fakeApi.listen(0, resolve));
+  const port = fakeApi.address().port;
+
+  const { scoreCard } = await import('../src/scorer.js');
+  const provider = createProvider({ provider: 'openai', baseURL: `http://localhost:${port}`, apiKey: 'test', model: 'test-model' });
+  const card = { name: 'Truncation Test Card', fields: { description: 'A test description.' } };
+  const result = await scoreCard(card, provider);
+
+  fakeApi.close();
+
+  assert.equal(requestedMaxTokens.length, 2, 'expected exactly one repair retry');
+  assert.ok(
+    requestedMaxTokens[1] > requestedMaxTokens[0],
+    `expected the retry's max_tokens (${requestedMaxTokens[1]}) to exceed the first attempt's (${requestedMaxTokens[0]})`,
+  );
+  assert.equal(result.fields.description.score, 7);
+  console.log(`✓ JSON-repair retry raises max_tokens (${requestedMaxTokens[0]} → ${requestedMaxTokens[1]}) instead of resending the same budget`);
 }
 
 main().catch((err) => {

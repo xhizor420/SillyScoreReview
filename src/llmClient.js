@@ -101,7 +101,7 @@ function createAnthropicProvider(config) {
   return {
     name: 'anthropic',
     model,
-    async chat({ system, user }) {
+    async chat({ system, user, maxTokens }) {
       return withRetries(async () => {
         const res = await fetchWithTimeout(
           `${baseURL}/v1/messages`,
@@ -114,7 +114,7 @@ function createAnthropicProvider(config) {
             },
             body: JSON.stringify({
               model,
-              max_tokens: config.maxTokens || 2000,
+              max_tokens: maxTokens || config.maxTokens || 3000,
               system,
               messages: [{ role: 'user', content: user }],
             }),
@@ -145,7 +145,7 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
   return {
     name,
     model,
-    async chat({ system, user }) {
+    async chat({ system, user, maxTokens }) {
       return withRetries(async () => {
         const res = await fetchWithTimeout(
           `${baseURL}/chat/completions`,
@@ -158,7 +158,7 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
             body: JSON.stringify({
               model,
               temperature: config.temperature ?? 0.2,
-              max_tokens: config.maxTokens || 2000,
+              max_tokens: maxTokens || config.maxTokens || 3000,
               messages: [
                 { role: 'system', content: system },
                 { role: 'user', content: user },

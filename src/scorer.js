@@ -32,7 +32,9 @@ Then provide:
 - Top 3 Priority Improvements
 - Summary
 
-Be critical but constructive. Specific, actionable feedback only.
+Be critical but constructive. Specific, actionable feedback only. Keep each strengths/weaknesses/suggestions \
+entry to one short sentence (max ~20 words) — this is a fast triage pass across a large card collection, not \
+a full editorial letter, and a long response risks being cut off before it's valid JSON.
 
 Respond with ONLY a single valid JSON object (no markdown fences, no commentary before or after) matching \
 exactly this shape:
@@ -105,10 +107,15 @@ export async function scoreCard(card, provider, { weights = DEFAULT_WEIGHTS } = 
   let parsed = extractJsonBlock(raw);
 
   if (!parsed || typeof parsed.fields !== 'object') {
+    // A common cause of unparseable JSON is the response getting cut off before
+    // it closes — so the retry gets real extra headroom (not just a scolding),
+    // on top of asking for tighter wording to make it less likely to recur.
     raw = await provider.chat({
       system: SYSTEM_PROMPT,
-      user: `${user}\n\nYour previous response was not valid JSON matching the required schema. \
-Respond again with ONLY the valid JSON object, nothing else.`,
+      user: `${user}\n\nYour previous response was not valid JSON matching the required schema (it may have \
+been cut off before finishing). Respond again with ONLY the valid JSON object, nothing else, and keep every \
+text field to one short sentence so the full response fits comfortably.`,
+      maxTokens: 4000,
     });
     parsed = extractJsonBlock(raw);
   }
