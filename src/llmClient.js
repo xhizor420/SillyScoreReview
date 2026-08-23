@@ -1,3 +1,5 @@
+import { RateLimiter } from './rateLimiter.js';
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 // Known providers with sane defaults, used both to fill in config.baseURL/model
@@ -14,8 +16,13 @@ export const PROVIDER_PRESETS = {
     docs: 'https://docs.nano-gpt.com',
     // Per-key limits per docs.nano-gpt.com/api-reference/miscellaneous/rate-limits:
     // 10 concurrent requests, a 10-requests/10s burst bucket, 60 requests/minute.
-    // Concurrency above this just queues locally and risks needless 429s.
-    rateLimitNote: 'NanoGPT allows up to 10 concurrent requests per key (60/min). 6-8 is a safe, fast setting; going near/above 10 mostly just adds retries.',
+    // Concurrency alone does not honor the per-minute ceiling — 8 in flight
+    // against a 2s model is ~240/min — so requests are also paced by a token
+    // bucket sized to these numbers.
+    maxConcurrency: 10,
+    requestsPerMinute: 60,
+    burst: 10,
+    rateLimitNote: 'NanoGPT allows 10 concurrent requests and 60 requests/minute per key. Requests are automatically paced to stay under 60/min, so raising concurrency past ~8 will not go faster.',
   },
   anthropic: {
     label: 'Anthropic (Claude)',
@@ -158,12 +165,24 @@ function createAnthropicProvider(config) {
 /** Works for OpenAI, NanoGPT, and any other OpenAI-compatible server (Ollama, LM Studio, text-generation-webui, vLLM, etc). */
 function createOpenAICompatProvider(config, name = 'openai-compatible') {
   const apiKey = config.apiKey || process.env.OPENAI_API_KEY || 'not-needed';
-  const model = config.model || PROVIDER_PRESETS[name]?.defaultModel || 'gpt-4o-mini';
-  const baseURL = config.baseURL || PROVIDER_PRESETS[name]?.baseURL || 'https://api.openai.com/v1';
+  const preset = PROVIDER_PRESETS[name];
+  const model = config.model || preset?.defaultModel || 'gpt-4o-mini';
+  const baseURL = config.baseURL || preset?.baseURL || 'https://api.openai.com/v1';
   if (!model) throw new Error(`No model set for provider "${name}" — pick one in Settings (Refresh model list, or type one in manually).`);
+
+  // An explicit config value wins (raise it if the provider granted you more,
+  // set 0 to disable pacing entirely — e.g. for a local model on your own box).
+  const limiter = new RateLimiter({
+    requestsPerMinute: config.requestsPerMinute ?? preset?.requestsPerMinute ?? 0,
+    burst: config.burst ?? preset?.burst,
+  });
 
   async function call({ system, user, maxTokens }) {
     return withRetries(async () => {
+      // Pace against the provider's published requests/minute ceiling before
+      // opening the connection — staying inside the limit rather than finding
+      // it by collecting 429s.
+      await limiter.acquire();
       const startedAt = Date.now();
       const res = await fetchWithTimeout(
         `${baseURL}/chat/completions`,
@@ -206,6 +225,7 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
     name,
     model,
     baseURL,
+    limiter,
     async chat(args) {
       return (await call(args)).content;
     },
@@ -245,6 +265,22 @@ function createMockProvider() {
         summary: 'Mock provider output — use --provider anthropic|openai for real scoring.',
       });
     },
+  };
+}
+
+/**
+ * Clamps a requested concurrency to what the provider documents it allows, so a
+ * hand-edited config or an over-eager Settings value can't push past the
+ * provider's stated ceiling. Returns the value to use plus why it changed.
+ */
+export function resolveConcurrency(config) {
+  const requested = Math.max(1, Number(config.concurrency) || 1);
+  const max = PROVIDER_PRESETS[config.provider]?.maxConcurrency;
+  if (!max || requested <= max) return { concurrency: requested, clamped: false };
+  return {
+    concurrency: max,
+    clamped: true,
+    reason: `${config.provider} documents a limit of ${max} concurrent requests; using ${max} instead of ${requested}.`,
   };
 }
 

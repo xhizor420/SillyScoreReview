@@ -4,7 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
-import { createProvider } from './llmClient.js';
+import { createProvider, resolveConcurrency } from './llmClient.js';
 import { scoreCard, DEFAULT_WEIGHTS } from './scorer.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
@@ -143,7 +143,11 @@ async function cmdScan(args) {
   }
 
   const provider = createProvider(config);
-  console.log(`Using provider "${provider.name}" (model: ${provider.model}), concurrency ${config.concurrency}.`);
+  const { concurrency, clamped, reason } = resolveConcurrency(config);
+  if (clamped) console.log(`Note: ${reason}`);
+  const rl = provider.limiter?.stats?.();
+  const paceNote = rl?.enabled ? `, paced to ${Math.round(rl.requestsPerMinute)} req/min` : '';
+  console.log(`Using provider "${provider.name}" (model: ${provider.model}), concurrency ${concurrency}${paceNote}.`);
 
   let done = 0;
   let errors = 0;
@@ -160,7 +164,7 @@ async function cmdScan(args) {
     return `[${finished}/${work.length} · ${perHour.toFixed(0)}/hr · ETA ${eta}]`;
   };
 
-  await runPool(work, config.concurrency, async ({ file, card, hash }) => {
+  await runPool(work, concurrency, async ({ file, card, hash }) => {
     try {
       const result = await scoreCard(card, provider, { weights: config.weights });
       await store.set(file, {

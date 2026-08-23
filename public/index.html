@@ -136,7 +136,13 @@
   <div class="settings-field">
     <label for="settingsConcurrency">Parallel requests</label>
     <input id="settingsConcurrency" type="number" min="1" max="20" />
+  </div>
+
+  <div class="settings-field">
+    <label for="settingsRpm">Requests per minute <span class="folder-hint">(0 = no pacing)</span></label>
+    <input id="settingsRpm" type="number" min="0" max="6000" />
     <p id="concurrencyHint" class="folder-hint"></p>
+    <p id="throughputHint" class="folder-hint"></p>
   </div>
 
   <div class="folder-actions">

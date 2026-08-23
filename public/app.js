@@ -57,7 +57,9 @@ const els = {
   refreshModelsBtn: document.getElementById('refreshModelsBtn'),
   settingsModelCustom: document.getElementById('settingsModelCustom'),
   settingsConcurrency: document.getElementById('settingsConcurrency'),
+  settingsRpm: document.getElementById('settingsRpm'),
   concurrencyHint: document.getElementById('concurrencyHint'),
+  throughputHint: document.getElementById('throughputHint'),
   saveSettingsBtn: document.getElementById('saveSettingsBtn'),
   settingsMsg: document.getElementById('settingsMsg'),
 };
@@ -565,12 +567,14 @@ async function openSettings() {
     els.settingsProvider.value = data.provider;
     els.settingsBaseUrl.value = data.baseURL || '';
     els.settingsConcurrency.value = data.concurrency;
+    els.settingsRpm.value = data.requestsPerMinute ?? 0;
     els.settingsModelCustom.value = data.model || '';
     els.apiKeyStatus.textContent = data.apiKeySet ? '(a key is saved — leave blank to keep it)' : '(none saved yet)';
     els.settingsApiKey.value = '';
     els.settingsModelSelect.innerHTML = `<option value="">— save settings, then Refresh list —</option>`;
     els.settingsMsg.textContent = '';
     els.concurrencyHint.textContent = settingsPresets[data.provider]?.rateLimitNote || '';
+    updateThroughputHint();
   } catch (err) {
     els.settingsMsg.textContent = `Could not load settings: ${err.message}`;
   }
@@ -598,7 +602,33 @@ els.settingsProvider.addEventListener('change', () => {
   if (preset) els.settingsBaseUrl.value = preset.baseURL;
   els.settingsModelSelect.innerHTML = `<option value="">— save settings, then Refresh list —</option>`;
   els.concurrencyHint.textContent = preset?.rateLimitNote || '';
+  if (preset?.requestsPerMinute !== undefined) els.settingsRpm.value = preset.requestsPerMinute;
+  if (preset?.maxConcurrency && Number(els.settingsConcurrency.value) > preset.maxConcurrency) {
+    els.settingsConcurrency.value = preset.maxConcurrency;
+  }
+  updateThroughputHint();
 });
+
+// Show what the current pacing actually means in cards/hour, so the tradeoff is
+// concrete rather than an abstract number.
+function updateThroughputHint() {
+  const rpm = Number(els.settingsRpm.value) || 0;
+  const conc = Number(els.settingsConcurrency.value) || 1;
+  const total = state.cards.length;
+  if (!rpm) {
+    els.throughputHint.textContent = 'No pacing: requests go as fast as concurrency allows. Only safe for a local model on your own hardware.';
+    return;
+  }
+  const perHour = rpm * 60;
+  const hours = total ? total / perHour : null;
+  const eta = hours == null ? '' : hours < 1 ? ` — about ${Math.round(hours * 60)} min for all ${total} cards` : ` — about ${hours.toFixed(1)} h for all ${total} cards`;
+  els.throughputHint.textContent =
+    `${rpm}/min = up to ${perHour} cards/hour${eta}. ` +
+    `Reaching that also needs the model to answer in under ~${(conc / rpm * 60).toFixed(0)}s; slower than that and concurrency (${conc}) becomes the limit instead.`;
+}
+
+els.settingsRpm.addEventListener('input', updateThroughputHint);
+els.settingsConcurrency.addEventListener('input', updateThroughputHint);
 
 els.settingsModelSelect.addEventListener('change', () => {
   if (els.settingsModelSelect.value) els.settingsModelCustom.value = els.settingsModelSelect.value;
@@ -612,6 +642,7 @@ els.saveSettingsBtn.addEventListener('click', async () => {
     baseURL: els.settingsBaseUrl.value.trim(),
     model: els.settingsModelCustom.value.trim(),
     concurrency: Number(els.settingsConcurrency.value) || undefined,
+    requestsPerMinute: els.settingsRpm.value === '' ? undefined : Number(els.settingsRpm.value),
   };
   if (els.settingsApiKey.value.trim()) body.apiKey = els.settingsApiKey.value.trim();
 

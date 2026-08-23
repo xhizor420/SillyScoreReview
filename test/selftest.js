@@ -174,14 +174,21 @@ async function main() {
     const saveSettingsRes = await fetch('http://localhost:4180/api/settings', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ provider: 'nanogpt', apiKey: 'test-key-123', model: 'some-model' }),
+      body: JSON.stringify({ provider: 'nanogpt', apiKey: 'test-key-123', model: 'some-model', requestsPerMinute: 45 }),
     });
     const saveSettings = await saveSettingsRes.json();
     assert.equal(saveSettings.persisted, true);
     const onDiskAfterSettings = JSON.parse(await readFile(configPath, 'utf8'));
     assert.equal(onDiskAfterSettings.provider, 'nanogpt');
     assert.equal(onDiskAfterSettings.apiKey, 'test-key-123');
-    console.log('✓ server /api/settings switches provider and persists provider/model/apiKey to config.json');
+    assert.equal(onDiskAfterSettings.requestsPerMinute, 45);
+    console.log('✓ server /api/settings switches provider and persists provider/model/apiKey/rate to config.json');
+
+    const settingsAfter = await (await fetch('http://localhost:4180/api/settings')).json();
+    assert.equal(settingsAfter.requestsPerMinute, 45);
+    assert.equal(settingsAfter.presets.nanogpt.requestsPerMinute, 60);
+    assert.equal(settingsAfter.presets.nanogpt.maxConcurrency, 10);
+    console.log('✓ settings reports the saved rate and NanoGPT\'s documented 60/min + 10-concurrent limits');
 
     // switch back to mock so nothing below tries to hit the real network
     await fetch('http://localhost:4180/api/settings', {

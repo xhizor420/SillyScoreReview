@@ -6,7 +6,7 @@ import { readFile, writeFile, readdir, rename, unlink, stat, mkdir } from 'node:
 import { fileURLToPath } from 'node:url';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
-import { createProvider, listModels, PROVIDER_PRESETS } from './llmClient.js';
+import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from './llmClient.js';
 import { scoreCard } from './scorer.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
@@ -227,7 +227,7 @@ export async function startServer(config) {
       results: [],
       startedAt: new Date().toISOString(),
       startedAtMs: Date.now(),
-      concurrency: config.concurrency,
+      concurrency: resolveConcurrency(config).concurrency,
       model: config.model || null,
       inFlight: 0,
       active: [],       // cards currently awaiting a response, with elapsed time
@@ -246,7 +246,7 @@ export async function startServer(config) {
         job.fatalError = err.message;
         return;
       }
-      await runPool(files, config.concurrency, async (file) => {
+      await runPool(files, job.concurrency, async (file) => {
         const startedMs = Date.now();
         job.inFlight++;
         job.active.push({ file, startedMs });
@@ -378,12 +378,15 @@ export async function startServer(config) {
   });
 
   app.get('/api/settings', (req, res) => {
+    const preset = PROVIDER_PRESETS[config.provider];
     res.json({
       provider: config.provider,
       model: config.model || '',
-      baseURL: config.baseURL || PROVIDER_PRESETS[config.provider]?.baseURL || '',
+      baseURL: config.baseURL || preset?.baseURL || '',
       apiKeySet: Boolean(config.apiKey || process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY),
       concurrency: config.concurrency,
+      effectiveConcurrency: resolveConcurrency(config).concurrency,
+      requestsPerMinute: config.requestsPerMinute ?? preset?.requestsPerMinute ?? 0,
       charactersDir: config.charactersDir,
       authRequired: Boolean(config.authToken),
       presets: PROVIDER_PRESETS,
@@ -391,7 +394,7 @@ export async function startServer(config) {
   });
 
   app.post('/api/settings', async (req, res) => {
-    const { provider, model, baseURL, apiKey, concurrency } = req.body || {};
+    const { provider, model, baseURL, apiKey, concurrency, requestsPerMinute } = req.body || {};
     if (provider !== undefined) {
       if (!PROVIDER_PRESETS[provider]) return res.status(400).json({ error: `Unknown provider "${provider}"` });
       config.provider = provider;
@@ -400,6 +403,9 @@ export async function startServer(config) {
     if (baseURL !== undefined) config.baseURL = baseURL;
     if (apiKey) config.apiKey = apiKey; // blank/omitted = keep whatever's already saved
     if (concurrency) config.concurrency = Math.max(1, Number(concurrency));
+    if (requestsPerMinute !== undefined && requestsPerMinute !== '') {
+      config.requestsPerMinute = Math.max(0, Number(requestsPerMinute));
+    }
 
     let persisted = true;
     let persistError = null;
@@ -410,6 +416,7 @@ export async function startServer(config) {
       if (baseURL !== undefined) patch.baseURL = baseURL;
       if (apiKey) patch.apiKey = apiKey;
       if (concurrency) patch.concurrency = config.concurrency;
+      if (requestsPerMinute !== undefined && requestsPerMinute !== '') patch.requestsPerMinute = config.requestsPerMinute;
       await persistConfigPatch(patch);
     } catch (err) {
       persisted = false;

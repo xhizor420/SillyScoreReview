@@ -116,15 +116,42 @@ model) and **Change folder** button (your characters folder) instead of hand-edi
   endpoint (e.g. `http://localhost:11434/v1` for Ollama).
 - **Model** — after saving, click **Refresh list** to pull the live list of models your
   key/provider actually has access to, or type a model name manually.
-- **Parallel requests** — how many cards to score at once (default 8). For NanoGPT
-  specifically: their documented per-key limits are 10 concurrent requests and 60
-  requests/minute ([docs.nano-gpt.com](https://docs.nano-gpt.com/api-reference/miscellaneous/rate-limits)),
-  so **6-8 is a fast, safe setting** — going at or above 10 doesn't score any faster, it
-  just trades local queueing for the provider's own 429 responses. A 429 with a
-  `Retry-After` header is honored exactly (not guessed at with generic backoff), so
-  occasional rate-limit hits self-correct automatically rather than failing the card.
-  For other hosted APIs, check their limits before pushing much past 5; local models can
-  usually go higher if your hardware can take it.
+- **Parallel requests** — how many requests may be open at once (default 8).
+- **Requests per minute** — how fast requests are actually issued (default: the
+  provider's documented limit; 60 for NanoGPT). Set 0 to disable pacing entirely — only
+  sensible for a local model on your own hardware.
+
+### Staying inside NanoGPT's limits
+
+NanoGPT documents two separate per-key limits: **10 concurrent requests** and **60
+requests/minute** ([docs.nano-gpt.com](https://docs.nano-gpt.com/api-reference/miscellaneous/rate-limits)).
+Both are respected by default, and they are genuinely different constraints —
+concurrency alone does not keep you under a per-minute cap, because 8 requests in
+flight against a 2-second model is ~240 requests/minute.
+
+- Requests are **evenly paced** to the configured requests/minute rather than fired in
+  bursts. Even pacing is used deliberately: a token bucket or sliding window can put a
+  full burst at the end of one window and another at the start of the next, so a rolling
+  measurement sees up to double the intended rate. Even spacing is bounded in *every*
+  window.
+- Concurrency is **clamped** to the provider's documented maximum, so a hand-edited
+  config can't push past it.
+- A `429` with a `Retry-After` header is honored exactly as instructed rather than
+  guessed at with generic backoff.
+
+**60/min is the ceiling, and it's fast**: 3,600 cards/hour, so a 3,765-card library is
+about an hour — *if* the model answers quickly. The real rate is
+`min(requests-per-minute, concurrency ÷ latency)`, so a model taking 30s per request
+caps you at 10÷30s = 20/min no matter what pacing you set. That is why model choice
+matters more than any of these numbers.
+
+Running **at** the documented limit is fine — that's what the default does. Going *over*
+it is what risks your key, which is why the clamp and pacing exist.
+
+Hitting your own **credit/token quota** is a different thing entirely and is nothing to
+worry about: the provider returns a 429 with a long `Retry-After` (i.e. "resets at
+midnight"), those cards get marked failed, the run continues, and **Scan unscored**
+picks them all up once your quota resets.
 
 (If you'd rather configure by hand: same fields, in `config.json` — `charactersDir`,
 `provider`, `model`, `apiKey`, `baseURL`, `concurrency`. You can also set
