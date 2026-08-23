@@ -9,6 +9,7 @@ import { scoreCard, DEFAULT_WEIGHTS } from './scorer.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
 import { classifyError } from './errorKinds.js';
+import { resolveCacheFile, listCaches } from './cachePath.js';
 
 const DEFAULT_CONFIG = {
   charactersDir: './characters',
@@ -104,7 +105,8 @@ function scoreBucket(score) {
 
 async function cmdScan(args) {
   const config = await loadConfig(args);
-  const store = await new Store(config.cacheFile).load();
+  const cacheFile = await resolveCacheFile(config.cacheFile, config.charactersDir);
+  const store = await new Store(cacheFile, config.charactersDir).load();
   const files = await listCardFiles(config.charactersDir);
 
   const rescore = Boolean(args.rescore);
@@ -205,7 +207,8 @@ async function cmdScan(args) {
 
 async function cmdStats(args) {
   const config = await loadConfig(args);
-  const store = await new Store(config.cacheFile).load();
+  const cacheFile = await resolveCacheFile(config.cacheFile, config.charactersDir);
+  const store = await new Store(cacheFile, config.charactersDir).load();
   const entries = Object.values(store.all());
   const buckets = {};
   const errorGroups = new Map();
@@ -230,6 +233,9 @@ async function cmdStats(args) {
   }
 
   const attempted = scored + failed;
+  console.log(`Characters folder: ${config.charactersDir}`);
+  console.log(`Score data file:   ${cacheFile}`);
+  console.log('');
   console.log(`Total cached entries: ${entries.length}`);
   console.log(`Scored successfully: ${scored}${scored ? `, average overall score: ${(sum / scored).toFixed(2)}` : ''}`);
   if (attempted > 0) {
@@ -289,6 +295,26 @@ async function main() {
     case 'serve':
       await cmdServe(args);
       break;
+    case 'caches': {
+      // "Where did my scores go?" — list every cache file and which folder it
+      // describes, so a mismatch is visible instead of looking like data loss.
+      const config = await loadConfig(args);
+      const active = await resolveCacheFile(config.cacheFile, config.charactersDir);
+      const all = await listCaches(config.cacheFile);
+      console.log(`Active characters folder: ${config.charactersDir}`);
+      console.log(`Active score data file:   ${active}\n`);
+      if (!all.length) {
+        console.log('No cache files found yet — nothing has been scored.');
+        break;
+      }
+      console.log('All score data files found:');
+      for (const c of all) {
+        const mark = c.file === active ? '->' : '  ';
+        console.log(`${mark} ${c.name}  ${String(c.cardCount).padStart(6)} cards`);
+        console.log(`     folder: ${c.charactersDir || '(not recorded — written by an older version)'}`);
+      }
+      break;
+    }
     case 'doctor': {
       const config = await loadConfig(args);
       const { runDoctor } = await import('./doctor.js');
@@ -306,6 +332,10 @@ Usage:
   node src/cli.js doctor [--config config.json]
         Tests a few real cards against your API and explains what is slow or failing.
         Run this FIRST if a scan is crawling.
+
+  node src/cli.js caches [--config config.json]
+        Lists every score-data file and which characters folder each belongs to.
+        Use this if scores look like they vanished.
 
   node src/cli.js stats [--config config.json]
   node src/cli.js serve [--config config.json] [--port 4180]

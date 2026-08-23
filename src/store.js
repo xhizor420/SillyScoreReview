@@ -7,9 +7,15 @@ import { dirname } from 'node:path';
  * never corrupts previously saved results.
  */
 export class Store {
-  constructor(filePath) {
+  /**
+   * @param {string} filePath
+   * @param {string} [charactersDir] recorded in the file so a cache can always
+   *   be traced back to the folder it describes (see cachePath.js)
+   */
+  constructor(filePath, charactersDir) {
     this.filePath = filePath;
-    this.data = { version: 1, cards: {} };
+    this.charactersDir = charactersDir;
+    this.data = { version: 1, charactersDir: charactersDir ?? null, cards: {} };
     this._writeQueue = Promise.resolve();
   }
 
@@ -18,6 +24,8 @@ export class Store {
       const raw = await readFile(this.filePath, 'utf8');
       this.data = JSON.parse(raw);
       if (!this.data.cards) this.data.cards = {};
+      // Stamp the folder onto caches written before this was recorded.
+      if (!this.data.charactersDir && this.charactersDir) this.data.charactersDir = this.charactersDir;
     } catch (err) {
       if (err.code !== 'ENOENT') throw err;
       // no cache yet, start fresh

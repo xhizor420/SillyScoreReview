@@ -99,7 +99,11 @@ async function main() {
   assert.match(scan.stdout, /2 scored, 0 errors/);
   console.log('✓ scan (mock provider) scores both cards with 0 errors');
 
-  const cache = JSON.parse(await readFile(cacheFile, 'utf8'));
+  // Resolve the score file the same way the app does, rather than assuming a
+  // fixed name — the folder determines it (see cachePath.js).
+  const { resolveCacheFile } = await import('../src/cachePath.js');
+  const activeCacheFile = await resolveCacheFile(cacheFile, charactersDir);
+  const cache = JSON.parse(await readFile(activeCacheFile, 'utf8'));
   assert.equal(Object.keys(cache.cards).length, 2);
   const goodResult = cache.cards['good-card.png'].result;
   assert.ok(goodResult.overall_score >= 1 && goodResult.overall_score <= 10);
@@ -113,17 +117,17 @@ async function main() {
   // Simulate a card that failed on a previous run (e.g. a network error, a bad
   // response) and confirm the next plain `scan` — no --rescore needed — picks
   // it back up automatically, exactly like a real failed card would.
-  const cacheWithFailure = JSON.parse(await readFile(cacheFile, 'utf8'));
+  const cacheWithFailure = JSON.parse(await readFile(activeCacheFile, 'utf8'));
   cacheWithFailure.cards['bloated-card.png'].result = null;
   cacheWithFailure.cards['bloated-card.png'].error = 'simulated network failure';
-  await writeFile(cacheFile, JSON.stringify(cacheWithFailure, null, 2));
+  await writeFile(activeCacheFile, JSON.stringify(cacheWithFailure, null, 2));
 
   const scanAfterFailure = await run('node', [path.join(PROJECT_ROOT, 'src/cli.js'), 'scan', '--config', configPath]);
   assert.match(scanAfterFailure.stdout, /1 need scoring/);
   assert.match(scanAfterFailure.stdout, /1 scored, 0 errors/);
   console.log('✓ a previously-failed card is automatically retried on the next scan (no --rescore needed)');
 
-  const cacheAfterRetry = JSON.parse(await readFile(cacheFile, 'utf8'));
+  const cacheAfterRetry = JSON.parse(await readFile(activeCacheFile, 'utf8'));
   assert.equal(cacheAfterRetry.cards['bloated-card.png'].error, null);
   assert.ok(cacheAfterRetry.cards['bloated-card.png'].result.overall_score >= 1);
   console.log('✓ the retried card now has a clean result and no error in the cache');
@@ -257,8 +261,59 @@ async function main() {
   await testJsonRepairRetryGetsMoreTokens();
   await testTimeoutRetriesOnlyOnce();
   await testTimeoutRetryGetsLongerDeadline();
+  await testCacheFollowsTheFolder();
 
   console.log('\nAll self-tests passed.');
+}
+
+// Scores must always be found again for the folder they belong to. An earlier
+// version keyed the "initial" folder to the configured cacheFile and any
+// later-picked folder to a hashed file — so switching folders in the dashboard
+// wrote scores to cache-<hash>.json while config.json was updated to that
+// folder, and the next startup read the empty configured file. A full night of
+// scoring looked like it had vanished.
+async function testCacheFollowsTheFolder() {
+  const { resolveCacheFile } = await import('../src/cachePath.js');
+  const { Store } = await import('../src/store.js');
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'sillyscore-cachepath-'));
+  const cacheFile = path.join(dir, 'data', 'cache.json');
+  const folderA = path.join(dir, 'A');
+  const folderB = path.join(dir, 'B');
+  await mkdir(folderA, { recursive: true });
+  await mkdir(folderB, { recursive: true });
+
+  // Score something against folder B, as a folder switch would.
+  const fileB = await resolveCacheFile(cacheFile, folderB);
+  const storeB = await new Store(fileB, folderB).load();
+  await storeB.set('card.png', { name: 'B card', result: { overall_score: 7 }, error: null });
+
+  // Resolving folder B again — a fresh process, as after a restart — must find
+  // the same file, not a new empty one.
+  const fileBAgain = await resolveCacheFile(cacheFile, folderB);
+  assert.equal(fileBAgain, fileB, 'a folder must resolve to the same cache file every time');
+  const reloaded = await new Store(fileBAgain, folderB).load();
+  assert.equal(reloaded.get('card.png')?.result.overall_score, 7);
+  console.log('✓ a folder resolves to the same score file across restarts (scores are not orphaned)');
+
+  // Folder A must not see folder B's scores.
+  const fileA = await resolveCacheFile(cacheFile, folderA);
+  assert.notEqual(fileA, fileB);
+  const storeA = await new Store(fileA, folderA).load();
+  assert.equal(storeA.get('card.png'), undefined);
+  console.log('✓ a different folder gets its own scores, not the previous folder\'s');
+
+  // A legacy cache.json written before folders were recorded is still adopted.
+  const legacyDir = await mkdtemp(path.join(tmpdir(), 'sillyscore-legacy-'));
+  const legacyCache = path.join(legacyDir, 'data', 'cache.json');
+  await mkdir(path.dirname(legacyCache), { recursive: true });
+  await writeFile(legacyCache, JSON.stringify({ version: 1, cards: { 'old.png': { name: 'Old', result: { overall_score: 5 }, error: null } } }));
+  const resolvedLegacy = await resolveCacheFile(legacyCache, path.join(legacyDir, 'chars'));
+  assert.equal(resolvedLegacy, legacyCache, 'an existing cache.json from an older version must still be used');
+  console.log('✓ a cache.json written by an older version is still picked up, not orphaned');
+
+  await rm(dir, { recursive: true, force: true });
+  await rm(legacyDir, { recursive: true, force: true });
 }
 
 // Retrying a timeout with the SAME deadline that just proved too short turns a

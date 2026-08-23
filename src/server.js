@@ -10,6 +10,7 @@ import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from
 import { scoreCard } from './scorer.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
+import { resolveCacheFile } from './cachePath.js';
 import { classifyError } from './errorKinds.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -32,15 +33,13 @@ export async function startServer(config) {
   // belong to a same-named file in a folder you switched away from, so
   // each characters folder the picker has pointed at gets its own cache
   // file (auto-derived next to the configured one, keyed by folder path).
-  const initialDir = path.resolve(config.charactersDir);
-  const stores = new Map([[initialDir, await new Store(config.cacheFile).load()]]);
+  const stores = new Map();
   async function getStore(charactersDir) {
     const key = path.resolve(charactersDir);
     let store = stores.get(key);
     if (!store) {
-      const hash = createHash('sha1').update(key).digest('hex').slice(0, 10);
-      const file = path.join(path.dirname(config.cacheFile), `cache-${hash}.json`);
-      store = await new Store(file).load();
+      const file = await resolveCacheFile(config.cacheFile, key);
+      store = await new Store(file, key).load();
       stores.set(key, store);
     }
     return store;
