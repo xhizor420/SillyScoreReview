@@ -128,12 +128,18 @@ export async function runDoctor(config) {
   const median = latencies[Math.floor(latencies.length / 2)] || 0;
 
   if (timedOut.length) {
-    say(`✗ ${timedOut.length}/${results.length} requests TIMED OUT.`);
-    say('  Your model is too slow for this workload. Each timeout burns the full');
-    say(`  ${Math.round((config.timeoutMs || 120_000) / 1000)}s (plus one retry) and the card still fails.`);
-    say('  FIX: switch to a faster model in Settings. On NanoGPT, avoid large');
-    say('  "reasoning"/"thinking" models for this — they are many times slower and');
-    say('  spend their output budget on reasoning instead of the JSON we need.');
+    const currentTimeoutS = Math.round((config.timeoutMs || 120_000) / 1000);
+    say(`✗ ${timedOut.length}/${results.length} requests TIMED OUT (current limit: ${currentTimeoutS}s).`);
+    say('  A timed-out request is retried once with double the deadline, so a');
+    say('  merely-slow model usually still succeeds — but if these are failing');
+    say('  outright, the model is slower than twice your timeout.');
+    say('');
+    say('  FIX (either):');
+    say(`   1. Switch to a faster model in Settings — the real fix. On NanoGPT,`);
+    say('      avoid large "reasoning"/"thinking" models here: they are many times');
+    say('      slower and spend their output budget thinking instead of answering.');
+    say(`   2. Or raise "timeoutMs" in config.json above ${currentTimeoutS * 2}s if you`);
+    say('      genuinely want to wait that long per card.');
   } else if (truncated.length) {
     say(`⚠ ${truncated.length}/${results.length} responses were CUT OFF (finish_reason: length).`);
     say('  The model ran out of output budget before finishing its JSON. Each of');
@@ -161,6 +167,16 @@ export async function runDoctor(config) {
     const okMedian = okLatencies[Math.floor(okLatencies.length / 2)];
     say(`Median latency of successful requests: ${fmtSeconds(okMedian)}`);
     say(`At this speed, ${files.length} cards at concurrency ${config.concurrency} would take about ${estimateFullRun(okMedian, files.length, config.concurrency)}.`);
+    // Recommend a deadline with real headroom over what we actually observed,
+    // so normal variance doesn't get killed as a "timeout".
+    const slowest = Math.max(...succeeded.map((r) => r.latencyMs));
+    const suggestedMs = Math.ceil((slowest * 3) / 10_000) * 10_000;
+    const currentMs = config.timeoutMs || 120_000;
+    if (suggestedMs > currentMs) {
+      say('');
+      say(`Slowest successful request: ${fmtSeconds(slowest)}, but your timeout is only ${fmtSeconds(currentMs)}.`);
+      say(`That leaves little headroom for variance — consider "timeoutMs": ${suggestedMs} in config.json.`);
+    }
     if (okMedian > 30_000) {
       say('');
       say('That is very slow per request. A fast model should answer in 2-10s.');

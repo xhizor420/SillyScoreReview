@@ -139,6 +139,12 @@
   </div>
 
   <div class="settings-field">
+    <label for="settingsTimeout">Timeout per request (seconds)</label>
+    <input id="settingsTimeout" type="number" min="5" max="900" />
+    <p class="folder-hint">A request that times out is retried once with double this deadline before the card is marked failed.</p>
+  </div>
+
+  <div class="settings-field">
     <label for="settingsRpm">Requests per minute <span class="folder-hint">(0 = no pacing)</span></label>
     <input id="settingsRpm" type="number" min="0" max="6000" />
     <p id="concurrencyHint" class="folder-hint"></p>

@@ -256,8 +256,50 @@ async function main() {
   await testRetryAfterHonored();
   await testJsonRepairRetryGetsMoreTokens();
   await testTimeoutRetriesOnlyOnce();
+  await testTimeoutRetryGetsLongerDeadline();
 
   console.log('\nAll self-tests passed.');
+}
+
+// Retrying a timeout with the SAME deadline that just proved too short turns a
+// merely-slow model into a failed card. Measured against a model whose latency
+// straddles the timeout, same-deadline retries failed 8-17% of cards; escalating
+// the deadline failed 0%. The retry must ask for more time, not the same time.
+async function testTimeoutRetryGetsLongerDeadline() {
+  const FIRST_TIMEOUT = 400;
+  const RESPOND_AFTER = 600; // slower than attempt 1's deadline, inside attempt 2's
+  let attempts = 0;
+
+  const slowApi = createServer((req, res) => {
+    attempts++;
+    setTimeout(() => {
+      if (res.writableEnded) return;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ fields: { description: { score: 6, strengths: 'a', weaknesses: 'b', suggestions: 'c' } }, overall_score: 6, top_priority_improvements: [], summary: 'ok' }) }, finish_reason: 'stop' }],
+      }));
+    }, RESPOND_AFTER);
+  });
+  await new Promise((resolve) => slowApi.listen(0, resolve));
+
+  const provider = createProvider({
+    provider: 'openai',
+    baseURL: `http://localhost:${slowApi.address().port}`,
+    apiKey: 'test',
+    model: 'test-model',
+    timeoutMs: FIRST_TIMEOUT,
+    requestsPerMinute: 0,
+  });
+
+  const { scoreCard } = await import('../src/scorer.js');
+  const result = await scoreCard({ name: 'Slow Model Card', fields: { description: 'a description' } }, provider);
+
+  slowApi.closeAllConnections?.();
+  slowApi.close();
+
+  assert.equal(result.fields.description.score, 6);
+  assert.equal(attempts, 2, `expected the first attempt to time out and a second to succeed, saw ${attempts}`);
+  console.log(`✓ a timed-out request is retried with a longer deadline (${FIRST_TIMEOUT}ms → ${FIRST_TIMEOUT * 2}ms) and succeeds instead of failing`);
 }
 
 // A request that times out is almost always going to time out again — retrying

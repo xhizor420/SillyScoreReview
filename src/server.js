@@ -387,6 +387,7 @@ export async function startServer(config) {
       concurrency: config.concurrency,
       effectiveConcurrency: resolveConcurrency(config).concurrency,
       requestsPerMinute: config.requestsPerMinute ?? preset?.requestsPerMinute ?? 0,
+      timeoutMs: config.timeoutMs ?? 120000,
       charactersDir: config.charactersDir,
       authRequired: Boolean(config.authToken),
       presets: PROVIDER_PRESETS,
@@ -394,7 +395,7 @@ export async function startServer(config) {
   });
 
   app.post('/api/settings', async (req, res) => {
-    const { provider, model, baseURL, apiKey, concurrency, requestsPerMinute } = req.body || {};
+    const { provider, model, baseURL, apiKey, concurrency, requestsPerMinute, timeoutMs } = req.body || {};
     if (provider !== undefined) {
       if (!PROVIDER_PRESETS[provider]) return res.status(400).json({ error: `Unknown provider "${provider}"` });
       config.provider = provider;
@@ -406,6 +407,7 @@ export async function startServer(config) {
     if (requestsPerMinute !== undefined && requestsPerMinute !== '') {
       config.requestsPerMinute = Math.max(0, Number(requestsPerMinute));
     }
+    if (timeoutMs) config.timeoutMs = Math.max(5000, Number(timeoutMs));
 
     let persisted = true;
     let persistError = null;
@@ -417,6 +419,7 @@ export async function startServer(config) {
       if (apiKey) patch.apiKey = apiKey;
       if (concurrency) patch.concurrency = config.concurrency;
       if (requestsPerMinute !== undefined && requestsPerMinute !== '') patch.requestsPerMinute = config.requestsPerMinute;
+      if (timeoutMs) patch.timeoutMs = config.timeoutMs;
       await persistConfigPatch(patch);
     } catch (err) {
       persisted = false;

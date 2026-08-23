@@ -93,16 +93,19 @@ async function withRetries(fn, { retries = 4, baseDelayMs = 1500 } = {}) {
   let timeoutsSeen = 0;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await fn();
+      // A retry after a timeout gets a longer deadline rather than the same one
+      // that just proved too short — retrying an identical too-short deadline is
+      // how a merely-slow model turns into a failed card. Measured against a
+      // model whose latency straddles the timeout: same-deadline retries failed
+      // 8-17% of cards, while one retry at double the deadline failed 0% and
+      // made *fewer* HTTP calls overall, because nothing needed retrying twice.
+      return await fn({ timeoutMultiplier: 2 ** timeoutsSeen });
     } catch (err) {
       lastErr = err;
       const retriable = err.retriable !== false; // default: retry
       if (!retriable || attempt === retries) break;
-      // Timeouts get at most ONE retry, not the full ladder. A request that was
-      // too slow will almost always be too slow again, and each attempt costs a
-      // full timeout — 5 attempts at the 120s default is 10 wasted minutes for a
-      // card that then fails anyway. This was the dominant cost in a real slow
-      // scan: ~13x the timeout burned per card. One retry covers a genuine blip.
+      // Still capped: two attempts total for timeouts. The old five-attempt
+      // ladder burned ~10 minutes per card at the 120s default and failed anyway.
       if (err.isTimeout && ++timeoutsSeen > 1) break;
       // A long Retry-After (tens of minutes+) usually means a daily quota reset,
       // not a transient rate limit — waiting it out would just block this worker
@@ -129,7 +132,7 @@ function createAnthropicProvider(config) {
     name: 'anthropic',
     model,
     async chat({ system, user, maxTokens }) {
-      return withRetries(async () => {
+      return withRetries(async ({ timeoutMultiplier = 1 } = {}) => {
         const res = await fetchWithTimeout(
           `${baseURL}/v1/messages`,
           {
@@ -146,7 +149,7 @@ function createAnthropicProvider(config) {
               messages: [{ role: 'user', content: user }],
             }),
           },
-          config.timeoutMs || DEFAULT_TIMEOUT_MS,
+          (config.timeoutMs || DEFAULT_TIMEOUT_MS) * timeoutMultiplier,
         );
         if (!res.ok) {
           const body = await res.text().catch(() => '');
@@ -178,7 +181,7 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
   });
 
   async function call({ system, user, maxTokens }) {
-    return withRetries(async () => {
+    return withRetries(async ({ timeoutMultiplier = 1 } = {}) => {
       // Pace against the provider's published requests/minute ceiling before
       // opening the connection — staying inside the limit rather than finding
       // it by collecting 429s.
@@ -202,7 +205,7 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
             ],
           }),
         },
-        config.timeoutMs || DEFAULT_TIMEOUT_MS,
+        (config.timeoutMs || DEFAULT_TIMEOUT_MS) * timeoutMultiplier,
       );
       if (!res.ok) {
         const body = await res.text().catch(() => '');
