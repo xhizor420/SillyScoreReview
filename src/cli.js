@@ -3,6 +3,7 @@ import { readFile, readdir, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import os from 'node:os';
+import net from 'node:net';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, resolveConcurrency } from './llmClient.js';
@@ -306,12 +307,16 @@ async function main() {
         process.exitCode = 1;
         break;
       }
-      // Browsers drop the download in Downloads, not the project folder, so
-      // look there too rather than making the user move the file first.
+      // Look everywhere someone might reasonably have put it: the project
+      // folder, the data folder (next to the cache it restores), and Downloads
+      // where the browser actually saved it.
+      const base = path.basename(file);
       const candidates = [
         path.resolve(process.cwd(), file),
-        path.join(os.homedir(), 'Downloads', file),
-        path.join(os.homedir(), 'Downloads', path.basename(file)),
+        path.resolve(process.cwd(), 'data', base),
+        path.resolve(path.dirname(config.cacheFile), base),
+        path.join(os.homedir(), 'Downloads', base),
+        path.join(os.homedir(), 'Desktop', base),
       ];
       let found = null;
       for (const c of candidates) {
@@ -326,12 +331,32 @@ async function main() {
       if (!found) {
         console.error(`Could not find "${file}". Looked in:`);
         for (const c of [...new Set(candidates)]) console.error(`  ${c}`);
-        console.error('\nPut the file in this folder, or pass its full path, e.g.:');
+        console.error('\nPass the full path instead, e.g.:');
         console.error('  node src/cli.js import-scores "C:\\Users\\You\\Downloads\\recovered-scores.json"');
         process.exitCode = 1;
         break;
       }
-      if (found !== candidates[0]) console.log(`Found it in your Downloads folder: ${found}\n`);
+      if (found !== candidates[0]) console.log(`Found: ${found}\n`);
+
+      // The dashboard server keeps the score file in memory and rewrites the
+      // whole thing on its next save — so importing underneath a running server
+      // gets silently undone the moment it scores or deletes anything.
+      const serverUp = await new Promise((resolve) => {
+        const sock = net.createConnection({ host: '127.0.0.1', port: config.port, timeout: 700 });
+        sock.on('connect', () => { sock.destroy(); resolve(true); });
+        sock.on('error', () => resolve(false));
+        sock.on('timeout', () => { sock.destroy(); resolve(false); });
+      });
+      if (serverUp && !args.force) {
+        console.error(`The dashboard server is still running on port ${config.port}.`);
+        console.error('It holds the score file in memory and would overwrite this import');
+        console.error('the next time it saves. Close that window (the one running the');
+        console.error('server), then run this command again.');
+        console.error('\n(Use --force to import anyway, if you know the server is idle.)');
+        process.exitCode = 1;
+        break;
+      }
+
       const payload = JSON.parse(await readFile(found, 'utf8'));
       const r = await importScores({
         cacheFile: config.cacheFile,
@@ -348,8 +373,27 @@ async function main() {
         console.log(`  no matching card file : ${r.notFound}`);
         if (r.missing.length) console.log(`     e.g. ${r.missing.join(', ')}`);
       }
-      console.log('\nImported cards count as scored and will NOT be re-scanned.');
-      console.log('They show their score but no written critique — rescore individually if you want the detail.');
+      if (r.imported === 0) {
+        // A bare "0" here is the least useful possible answer — say which of the
+        // three reasons it was.
+        console.log('\nNothing was imported. Why:');
+        if (r.skippedExisting === r.total) {
+          console.log(`  All ${r.total} cards already have a full score with critique in`);
+          console.log('  this data file, so there was nothing to restore. Your scores are');
+          console.log('  already there — check with: node src/cli.js stats');
+        } else if (r.notFound === r.total) {
+          console.log(`  None of the ${r.total} cards in the file match a card in:`);
+          console.log(`    ${config.charactersDir}`);
+          console.log('  That is usually the wrong characters folder. Check the folder shown');
+          console.log('  by: node src/cli.js caches   — and switch to the right one if needed.');
+        } else {
+          console.log(`  ${r.skippedExisting} already had full results, ${r.notFound} matched no card file.`);
+        }
+      } else {
+        console.log('\nImported cards count as scored and will NOT be re-scanned.');
+        console.log('They show their score but no written critique — rescore individually if you want the detail.');
+        console.log('\nRefresh the dashboard in your browser to see them.');
+      }
       if (args['dry-run']) console.log('\nRe-run without --dry-run to apply.');
       break;
     }

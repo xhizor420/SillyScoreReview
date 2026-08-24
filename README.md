@@ -25,12 +25,18 @@ recovered without re-scoring anything:
 node src/cli.js import-scores recovered-scores.json
 ```
 
-You do **not** need to move the file — if it is still in your Downloads folder, that
-name is found there automatically. To be explicit, pass the full path instead:
+You do **not** need to move the file. It is looked for in the project folder, the
+`data` folder, next to your score file, and in Downloads/Desktop. To be explicit, pass
+the full path instead:
 
 ```
 node src/cli.js import-scores "C:\Users\YourName\Downloads\recovered-scores.json"
 ```
+
+**Close the dashboard server first** (the console window running it). It keeps the score
+file in memory and rewrites the whole thing on its next save, which would silently undo
+the import. `import-scores` refuses to run while it detects the server on the configured
+port.
 
 Imported cards count as fully scored and **will not be re-scanned** — the content hash is
 recomputed from the card file, so `scan` treats them like any other scored card. Only the
