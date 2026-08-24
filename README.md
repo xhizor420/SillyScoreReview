@@ -10,6 +10,27 @@ card are judged the same way: does the writing actually work, is it specific, do
 give the model something to play. The prompt explicitly tells the model to call out
 padding and redundancy as weaknesses.
 
+## Deleting cards does NOT re-score anything
+
+Culling garbage cards mid-run is a supported workflow, including while a scan is
+running. Deleting a card removes only that card's entry; every other card keeps its
+score, and the next scan reports `0 need scoring` for them. A card deleted while a
+worker was mid-request is simply dropped, not recorded as a failure.
+
+If deleting *appeared* to wipe your progress, you most likely hit the split-cache bug
+(fixed): switching folders in the dashboard wrote scores to a second file while the app
+later read the first one, so previously-scored cards looked unscored. Check and fix with:
+
+```
+node src/cli.js caches         # lists every score file and which folder it belongs to
+node src/cli.js merge-caches   # combines them into one, keeping the best entry per card
+```
+
+`merge-caches` never loses data: a real score always beats a stale error for the same
+card, newer beats older, the existing file is backed up first, and entries for cards no
+longer in the folder are pruned. Add `--dry-run` to preview, `--no-prune` to keep
+entries for deleted cards.
+
 ## Scan crawling? Run `doctor` first
 
 If a scan is going slowly, don't wait it out — run:

@@ -10,6 +10,7 @@ import { Store } from './store.js';
 import { runPool } from './concurrency.js';
 import { classifyError } from './errorKinds.js';
 import { resolveCacheFile, listCaches } from './cachePath.js';
+import { mergeCaches } from './mergeCaches.js';
 
 const DEFAULT_CONFIG = {
   charactersDir: './characters',
@@ -295,6 +296,31 @@ async function main() {
     case 'serve':
       await cmdServe(args);
       break;
+    case 'merge-caches': {
+      const config = await loadConfig(args);
+      const dryRun = Boolean(args['dry-run']);
+      const prune = !args['no-prune'];
+      const r = await mergeCaches({ cacheFile: config.cacheFile, charactersDir: config.charactersDir, prune, dryRun });
+
+      console.log(`${dryRun ? 'DRY RUN — nothing written.\n' : ''}Merging into: ${r.dest}\n`);
+      if (!r.sources.length) {
+        console.log('No other cache files to merge — there is only one.');
+      } else {
+        for (const s2 of r.sources) {
+          console.log(`  from ${s2.name}: ${s2.total} entries -> ${s2.added} new, ${s2.upgraded} replaced an error/older score`);
+        }
+      }
+      console.log('');
+      console.log(`  entries before : ${r.before}`);
+      console.log(`  added          : ${r.added}`);
+      console.log(`  upgraded       : ${r.upgraded}`);
+      if (r.pruned > 0) console.log(`  pruned         : ${r.pruned} (cards no longer in the folder)`);
+      else if (r.pruned === -1) console.log('  pruned         : skipped (could not read the characters folder)');
+      console.log(`  entries after  : ${r.after}   (${r.scored} scored, ${r.failed} failed)`);
+      if (r.backup) console.log(`\n  backup of the previous file: ${r.backup}`);
+      if (dryRun) console.log('\nRe-run without --dry-run to apply.');
+      break;
+    }
     case 'caches': {
       // "Where did my scores go?" — list every cache file and which folder it
       // describes, so a mismatch is visible instead of looking like data loss.
@@ -332,6 +358,11 @@ Usage:
   node src/cli.js doctor [--config config.json]
         Tests a few real cards against your API and explains what is slow or failing.
         Run this FIRST if a scan is crawling.
+
+  node src/cli.js merge-caches [--config config.json] [--dry-run] [--no-prune]
+        Combines all score-data files into the one for your current folder,
+        keeping the best entry per card, and drops entries for deleted cards.
+        Backs up the existing file first.
 
   node src/cli.js caches [--config config.json]
         Lists every score-data file and which characters folder each belongs to.

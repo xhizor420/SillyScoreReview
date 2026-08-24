@@ -79,7 +79,25 @@ export async function startServer(config) {
   }
 
   async function scoreOne(file, provider, store) {
-    const { card, hash } = await readCardOrThrow(file);
+    let card;
+    let hash;
+    try {
+      ({ card, hash } = await readCardOrThrow(file));
+    } catch (err) {
+      // Deleting a card while a scan is running is a normal thing to do — you
+      // spot garbage in the results and cull it. The in-flight worker then hits
+      // a missing file; recording that as a scoring error would leave a phantom
+      // entry for a card that no longer exists, inflating the failure count
+      // forever. Drop the entry instead.
+      if (err.code === 'ENOENT') {
+        await store.delete(file);
+        const gone = new Error('Card was deleted during the scan');
+        gone.cardDeleted = true;
+        throw gone;
+      }
+      throw err;
+    }
+
     try {
       const result = await scoreCard(card, provider, { weights: config.weights });
       const entry = {
@@ -266,6 +284,13 @@ export async function startServer(config) {
           job.results.push({ file, ...outcome });
           settle(outcome);
         } catch (err) {
+          if (err.cardDeleted) {
+            // You deleted it mid-scan; that is not a failure, just less work.
+            job.total = Math.max(0, job.total - 1);
+            job.inFlight--;
+            job.active = job.active.filter((a) => a.file !== file);
+            return;
+          }
           job.errors++;
           job.results.push({ file, error: err.message });
           settle({ error: err.message });

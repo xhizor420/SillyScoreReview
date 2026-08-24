@@ -262,8 +262,61 @@ async function main() {
   await testTimeoutRetriesOnlyOnce();
   await testTimeoutRetryGetsLongerDeadline();
   await testCacheFollowsTheFolder();
+  await testMergeCaches();
 
   console.log('\nAll self-tests passed.');
+}
+
+// Splitting scores across two cache files (the folder-switch bug) meant work
+// already paid for looked unscored. Merging must recover it without re-scoring,
+// must never let a stale error overwrite a real score, and must drop entries for
+// cards that no longer exist.
+async function testMergeCaches() {
+  const { mergeCaches } = await import('../src/mergeCaches.js');
+  const dir = await mkdtemp(path.join(tmpdir(), 'sillyscore-merge-'));
+  const charactersDir = path.join(dir, 'characters');
+  const cacheFile = path.join(dir, 'data', 'cache.json');
+  await mkdir(charactersDir, { recursive: true });
+  await mkdir(path.dirname(cacheFile), { recursive: true });
+
+  for (const n of ['a', 'b', 'c']) {
+    await writeFile(path.join(charactersDir, `${n}.png`), buildFakePng({
+      spec: 'chara_card_v2',
+      data: { name: n, description: 'd', personality: '', scenario: '', first_mes: 'hi', mes_example: '', system_prompt: '', post_history_instructions: '', alternate_greetings: [], tags: [] },
+    }));
+  }
+
+  const scored = (score, when) => ({ name: 'x', scoredAt: when, result: { overall_score: score }, error: null });
+  const failed = (when) => ({ name: 'x', scoredAt: when, result: null, error: 'Request timed out after 120s' });
+
+  // Legacy file: a scored, b FAILED, plus a ghost whose card was deleted.
+  await writeFile(cacheFile, JSON.stringify({
+    version: 1,
+    cards: { 'a.png': scored(7, '2026-01-01T00:00:00Z'), 'b.png': failed('2026-01-01T00:00:00Z'), 'ghost.png': failed('2026-01-01T00:00:00Z') },
+  }));
+
+  // Hashed file (written after a folder switch): b later SUCCEEDED, c is new.
+  const { hashedCacheFileFor } = await import('../src/cachePath.js');
+  await writeFile(hashedCacheFileFor(cacheFile, charactersDir), JSON.stringify({
+    version: 1,
+    charactersDir,
+    cards: { 'b.png': scored(9, '2026-02-01T00:00:00Z'), 'c.png': scored(4, '2026-02-01T00:00:00Z') },
+  }));
+
+  const r = await mergeCaches({ cacheFile, charactersDir });
+  const merged = JSON.parse(await readFile(r.dest, 'utf8')).cards;
+
+  assert.equal(Object.keys(merged).length, 3, 'expected exactly the three real cards');
+  assert.equal(merged['a.png'].result.overall_score, 7, 'a card only in the legacy file must be carried over');
+  assert.equal(merged['b.png'].result.overall_score, 9, 'a real score must win over a stale error for the same card');
+  assert.equal(merged['b.png'].error, null);
+  assert.equal(merged['c.png'].result.overall_score, 4);
+  assert.equal(merged['ghost.png'], undefined, 'an entry for a deleted card must be pruned');
+  assert.ok(r.backup, 'the previous file must be backed up before rewriting');
+  console.log(`✓ merging split caches recovers every score (${r.added} added, ${r.pruned} phantom pruned) without re-scoring`);
+  console.log('✓ a real score always wins over a stale error for the same card');
+
+  await rm(dir, { recursive: true, force: true });
 }
 
 // Scores must always be found again for the folder they belong to. An earlier
