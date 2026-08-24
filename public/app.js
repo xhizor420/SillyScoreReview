@@ -258,8 +258,9 @@ async function openCard(id) {
   if (result) {
     html += `<div class="overall-block">
       <div class="overall-score">${result.overall_score} / 10</div>
-      ${result.partial ? '<div class="partial-note">Score only — the written critique for this card was not saved (recovered from a previous session). Click Rescore to generate the full breakdown.</div>' : ''}
-      <div>${escapeHtml(result.summary || '')}</div>
+      ${result.partial
+        ? '<div class="partial-note">Score only. This score was recovered from a previous session, so the written critique is not available — click <b>Rescore</b> above to generate it. The card\'s own text is shown below so you can still judge it yourself.</div>'
+        : `<div>${escapeHtml(result.summary || '')}</div>`}
       ${result.top_priority_improvements?.length ? `<ol class="priority-list">${result.top_priority_improvements.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ol>` : ''}
     </div>`;
 
@@ -273,6 +274,23 @@ async function openCard(id) {
     }
   } else if (!entry?.error) {
     html += `<p>Not scored yet.</p>`;
+  }
+
+  // The card's own text, straight from the PNG. For a score-only entry this is
+  // the whole point — without a critique you still need to see what the card
+  // actually says to decide whether to keep it. Open by default when there is
+  // no critique to read, collapsed otherwise.
+  const populated = Object.entries(data.fields || {}).filter(([, v]) => v && v.trim());
+  if (populated.length) {
+    const noCritique = !result || result.partial || Object.keys(result.fields || {}).length === 0;
+    html += `<details class="card-content" ${noCritique ? 'open' : ''}>
+      <summary>Card content (${populated.length} field${populated.length === 1 ? '' : 's'})</summary>
+      ${populated.map(([name, text]) => `
+        <div class="field-block">
+          <div class="field-title"><span>${escapeHtml(name.replace(/_/g, ' '))}</span><span class="field-score">~${Math.ceil(text.length / 4)} tok</span></div>
+          <pre class="card-field-text">${escapeHtml(text)}</pre>
+        </div>`).join('')}
+    </details>`;
   }
 
   els.modalBody.innerHTML = html;
