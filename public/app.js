@@ -15,6 +15,7 @@ const els = {
   scanUnscoredBtn: document.getElementById('scanUnscoredBtn'),
   rescanAllBtn: document.getElementById('rescanAllBtn'),
   trashToggleBtn: document.getElementById('trashToggleBtn'),
+  exportScoresBtn: document.getElementById('exportScoresBtn'),
   scanPanel: document.getElementById('scanPanel'),
   progressFill: document.getElementById('progressFill'),
   progressLabel: document.getElementById('progressLabel'),
@@ -257,6 +258,7 @@ async function openCard(id) {
   if (result) {
     html += `<div class="overall-block">
       <div class="overall-score">${result.overall_score} / 10</div>
+      ${result.partial ? '<div class="partial-note">Score only — the written critique for this card was not saved (recovered from a previous session). Click Rescore to generate the full breakdown.</div>' : ''}
       <div>${escapeHtml(result.summary || '')}</div>
       ${result.top_priority_improvements?.length ? `<ol class="priority-list">${result.top_priority_improvements.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ol>` : ''}
     </div>`;
@@ -491,6 +493,26 @@ els.clearSelectionBtn.addEventListener('click', () => {
 // on all of it at once — ticking several hundred checkboxes by hand is not a
 // workflow. This selects/deselects exactly what the current filter+search shows.
 els.hideScanPanelBtn.addEventListener('click', () => els.scanPanel.classList.add('hidden'));
+
+// A local backup of just the score numbers. Cheap insurance: if the data file
+// is ever lost or split, these can be imported back without re-paying for the
+// scoring (node src/cli.js import-scores <file>).
+els.exportScoresBtn.addEventListener('click', () => {
+  const scores = state.cards
+    .filter((c) => c.overallScore != null)
+    .map((c) => ({ id: c.id, name: c.name, overallScore: c.overallScore, tokenEstimate: c.tokenEstimate }));
+  if (!scores.length) {
+    alert('No scored cards to export yet.');
+    return;
+  }
+  const payload = { exportedAt: new Date().toISOString(), charactersDir: els.dirLabel.textContent, scores };
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+  a.download = `sillyscorereview-scores-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
 
 els.selectAllShownBtn.addEventListener('click', () => {
   const shown = state.shown || [];

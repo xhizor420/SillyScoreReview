@@ -10,6 +10,28 @@ card are judged the same way: does the writing actually work, is it specific, do
 give the model something to play. The prompt explicitly tells the model to call out
 padding and redundancy as weaknesses.
 
+## Scores showing in a tab but missing from the data file?
+
+**Do not close or reload that tab.** The scores are still in its memory and can be
+recovered without re-scoring anything:
+
+1. In that tab press **F12** → **Console**.
+2. Open `recover-scores-snippet.js` from this folder, copy all of it, paste into the
+   console, press Enter. A `recovered-scores.json` downloads.
+3. Move that file into the SillyScoreReview folder and run:
+
+```
+node src/cli.js import-scores recovered-scores.json
+```
+
+Imported cards count as fully scored and **will not be re-scanned** — the content hash is
+recomputed from the card file, so `scan` treats them like any other scored card. Only the
+score number survives; the written critique was never in the page, so those cards show
+their score with a note and can be rescored individually if you want the detail back.
+
+To avoid needing this again, the dashboard now has an **Export scores** button that saves
+the same JSON on demand — worth doing after a long run. `import-scores` restores it.
+
 ## Deleting cards does NOT re-score anything
 
 Culling garbage cards mid-run is a supported workflow, including while a scan is

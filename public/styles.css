@@ -244,6 +244,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .field-sub b { color: var(--text-dim); font-weight: 600; }
 .overall-block { background: var(--panel-2); border-radius: 8px; padding: 14px; margin: 14px 0; }
 .overall-score { font-size: 28px; font-weight: 800; }
+.partial-note {
+  margin-top: 6px; padding: 6px 8px; border-radius: 6px;
+  background: rgba(224, 178, 58, 0.12); border: 1px solid var(--yellow);
+  color: var(--yellow); font-size: 12px;
+}
 .priority-list { margin: 8px 0 0 18px; padding: 0; }
 
 .trash-panel {

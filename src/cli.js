@@ -11,6 +11,7 @@ import { runPool } from './concurrency.js';
 import { classifyError } from './errorKinds.js';
 import { resolveCacheFile, listCaches } from './cachePath.js';
 import { mergeCaches } from './mergeCaches.js';
+import { importScores } from './importScores.js';
 
 const DEFAULT_CONFIG = {
   charactersDir: './characters',
@@ -296,6 +297,35 @@ async function main() {
     case 'serve':
       await cmdServe(args);
       break;
+    case 'import-scores': {
+      const config = await loadConfig(args);
+      const file = args._[0];
+      if (!file) {
+        console.error('Usage: node src/cli.js import-scores <recovered-scores.json> [--dry-run] [--overwrite]');
+        process.exitCode = 1;
+        break;
+      }
+      const payload = JSON.parse(await readFile(path.resolve(process.cwd(), file), 'utf8'));
+      const r = await importScores({
+        cacheFile: config.cacheFile,
+        charactersDir: config.charactersDir,
+        payload,
+        dryRun: Boolean(args['dry-run']),
+        overwrite: Boolean(args.overwrite),
+      });
+      console.log(`${args['dry-run'] ? 'DRY RUN — nothing written.\n' : ''}Importing into: ${r.dest}\n`);
+      console.log(`  scores in file        : ${r.total}`);
+      console.log(`  imported              : ${r.imported}`);
+      if (r.skippedExisting) console.log(`  skipped (already have a full result) : ${r.skippedExisting}`);
+      if (r.notFound) {
+        console.log(`  no matching card file : ${r.notFound}`);
+        if (r.missing.length) console.log(`     e.g. ${r.missing.join(', ')}`);
+      }
+      console.log('\nImported cards count as scored and will NOT be re-scanned.');
+      console.log('They show their score but no written critique — rescore individually if you want the detail.');
+      if (args['dry-run']) console.log('\nRe-run without --dry-run to apply.');
+      break;
+    }
     case 'merge-caches': {
       const config = await loadConfig(args);
       const dryRun = Boolean(args['dry-run']);
@@ -358,6 +388,10 @@ Usage:
   node src/cli.js doctor [--config config.json]
         Tests a few real cards against your API and explains what is slow or failing.
         Run this FIRST if a scan is crawling.
+
+  node src/cli.js import-scores <file.json> [--dry-run] [--overwrite]
+        Restores score numbers recovered from an open dashboard tab.
+        See recover-scores-snippet.js for how to get that file.
 
   node src/cli.js merge-caches [--config config.json] [--dry-run] [--no-prune]
         Combines all score-data files into the one for your current folder,
