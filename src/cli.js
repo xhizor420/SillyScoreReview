@@ -357,7 +357,19 @@ async function main() {
         break;
       }
 
-      const payload = JSON.parse(await readFile(found, 'utf8'));
+      const raw = await readFile(found, 'utf8');
+      console.log(`File   : ${found} (${(raw.length / 1024).toFixed(1)} KB)`);
+      console.log(`Folder : ${config.charactersDir}`);
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch (err) {
+        console.error(`\nThat file is not valid JSON: ${err.message}`);
+        console.error('It should start with { and end with }. If you saved it by hand,');
+        console.error('re-run the recovery snippet or the Export scores button.');
+        process.exitCode = 1;
+        break;
+      }
       const r = await importScores({
         cacheFile: config.cacheFile,
         charactersDir: config.charactersDir,
@@ -365,8 +377,10 @@ async function main() {
         dryRun: Boolean(args['dry-run']),
         overwrite: Boolean(args.overwrite),
       });
-      console.log(`${args['dry-run'] ? 'DRY RUN — nothing written.\n' : ''}Importing into: ${r.dest}\n`);
+      console.log(`Target : ${r.dest}`);
+      console.log(`${args['dry-run'] ? '\nDRY RUN — nothing written.' : ''}\n`);
       console.log(`  scores in file        : ${r.total}`);
+      console.log(`  card files in folder  : ${r.onDiskCount}`);
       console.log(`  imported              : ${r.imported}`);
       if (r.skippedExisting) console.log(`  skipped (already have a full result) : ${r.skippedExisting}`);
       if (r.notFound) {
@@ -389,6 +403,9 @@ async function main() {
         } else {
           console.log(`  ${r.skippedExisting} already had full results, ${r.notFound} matched no card file.`);
         }
+        // Show both sides so a naming mismatch is obvious rather than inferred.
+        console.log(`\n  first entries in your file : ${r.sampleFromFile.join(', ')}`);
+        console.log(`  first card files on disk   : ${r.sampleOnDisk.join(', ') || '(folder is empty)'}`);
       } else {
         console.log('\nImported cards count as scored and will NOT be re-scanned.');
         console.log('They show their score but no written critique — rescore individually if you want the detail.');

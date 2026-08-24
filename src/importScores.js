@@ -19,10 +19,31 @@ import { Store } from './store.js';
  * pay to re-derive a score they already have.
  */
 export async function importScores({ cacheFile, charactersDir, payload, dryRun = false, overwrite = false }) {
-  const rows = Array.isArray(payload) ? payload : payload?.scores;
-  if (!Array.isArray(rows) || rows.length === 0) {
-    throw new Error('No scores found in that file — expected a "scores" array (or a bare array).');
+  // Be liberal about shape: the snippet and the Export button both produce
+  // { scores: [...] }, but a hand-made file could reasonably be a bare array,
+  // a { cards: [...] }, or even a plain { "file.png": 7 } mapping.
+  let rows = null;
+  if (Array.isArray(payload)) rows = payload;
+  else if (Array.isArray(payload?.scores)) rows = payload.scores;
+  else if (Array.isArray(payload?.cards)) rows = payload.cards;
+  else if (payload && typeof payload === 'object') {
+    const pairs = Object.entries(payload).filter(([, v]) => typeof v === 'number' || typeof v?.overallScore === 'number');
+    if (pairs.length) {
+      rows = pairs.map(([k, v]) => ({ id: k, name: null, overallScore: typeof v === 'number' ? v : v.overallScore }));
+    }
   }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error(
+      'No scores found in that file. Expected a "scores" array (what the recovery ' +
+      'snippet and the Export scores button produce). Top-level keys seen: ' +
+      (payload && typeof payload === 'object' ? Object.keys(payload).join(', ') || '(none)' : typeof payload),
+    );
+  }
+
+  // Normalize the score field name — tolerate a few spellings.
+  rows = rows.map((r) => (r && typeof r === 'object'
+    ? { ...r, overallScore: r.overallScore ?? r.overall_score ?? r.score ?? null }
+    : r));
 
   const dest = await resolveCacheFile(cacheFile, charactersDir);
   const store = await new Store(dest, charactersDir).load();
@@ -106,5 +127,16 @@ export async function importScores({ cacheFile, charactersDir, payload, dryRun =
     imported++;
   }
 
-  return { dest, imported, skippedExisting, notFound, missing, total: rows.length };
+  return {
+    dest,
+    imported,
+    skippedExisting,
+    notFound,
+    missing,
+    total: rows.length,
+    // Enough to see a mismatch at a glance without opening the files.
+    sampleFromFile: rows.slice(0, 3).map((r) => r?.id || r?.name || '(no id/name)'),
+    sampleOnDisk: onDisk.slice(0, 3),
+    onDiskCount: onDisk.length,
+  };
 }
