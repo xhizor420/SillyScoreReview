@@ -2,6 +2,7 @@
 import { readFile, readdir, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import os from 'node:os';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, resolveConcurrency } from './llmClient.js';
@@ -305,7 +306,33 @@ async function main() {
         process.exitCode = 1;
         break;
       }
-      const payload = JSON.parse(await readFile(path.resolve(process.cwd(), file), 'utf8'));
+      // Browsers drop the download in Downloads, not the project folder, so
+      // look there too rather than making the user move the file first.
+      const candidates = [
+        path.resolve(process.cwd(), file),
+        path.join(os.homedir(), 'Downloads', file),
+        path.join(os.homedir(), 'Downloads', path.basename(file)),
+      ];
+      let found = null;
+      for (const c of candidates) {
+        try {
+          await readFile(c);
+          found = c;
+          break;
+        } catch {
+          // keep looking
+        }
+      }
+      if (!found) {
+        console.error(`Could not find "${file}". Looked in:`);
+        for (const c of [...new Set(candidates)]) console.error(`  ${c}`);
+        console.error('\nPut the file in this folder, or pass its full path, e.g.:');
+        console.error('  node src/cli.js import-scores "C:\\Users\\You\\Downloads\\recovered-scores.json"');
+        process.exitCode = 1;
+        break;
+      }
+      if (found !== candidates[0]) console.log(`Found it in your Downloads folder: ${found}\n`);
+      const payload = JSON.parse(await readFile(found, 'utf8'));
       const r = await importScores({
         cacheFile: config.cacheFile,
         charactersDir: config.charactersDir,

@@ -18,10 +18,18 @@ recovered without re-scoring anything:
 1. In that tab press **F12** → **Console**.
 2. Open `recover-scores-snippet.js` from this folder, copy all of it, paste into the
    console, press Enter. A `recovered-scores.json` downloads.
-3. Move that file into the SillyScoreReview folder and run:
+3. Run this from the SillyScoreReview folder (the one containing `src` and
+   `config.json`):
 
 ```
 node src/cli.js import-scores recovered-scores.json
+```
+
+You do **not** need to move the file — if it is still in your Downloads folder, that
+name is found there automatically. To be explicit, pass the full path instead:
+
+```
+node src/cli.js import-scores "C:\Users\YourName\Downloads\recovered-scores.json"
 ```
 
 Imported cards count as fully scored and **will not be re-scanned** — the content hash is
