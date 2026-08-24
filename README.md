@@ -46,6 +46,22 @@ their score with a note and can be rescored individually if you want the detail 
 To avoid needing this again, the dashboard now has an **Export scores** button that saves
 the same JSON on demand — worth doing after a long run. `import-scores` restores it.
 
+## Comparing duplicate characters
+
+Collections gather the same character several times — `Aria`, `Aria v2`, `aria (1)`,
+`Kaelen - copy`. Filter to **Possible duplicates**: cards with near-identical names are
+grouped together, highest score first, each tagged **BEST OF DUPES** or **DUPLICATE**.
+So the "same vibes, but this one scores higher" decision is a glance.
+
+Then **Select all but the best of each** picks every duplicate except the top scorer in
+its group, and **Delete selected** culls them. Cards with a unique name are never
+touched. Name matching ignores case, punctuation, bracketed bits, and the usual
+`v2`/`copy`/`final`/`edited` suffixes.
+
+To re-score cards that have no score or that failed, filter to **Unscored / errored
+only** — then either **Scan unscored** (does the whole set) or select individual cards
+and use **Score selected**.
+
 ## Deleting cards does NOT re-score anything
 
 Culling garbage cards mid-run is a supported workflow, including while a scan is

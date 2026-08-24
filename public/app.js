@@ -2,6 +2,8 @@ const state = {
   cards: [],
   shown: [],
   selected: new Set(),
+  dupeIds: new Set(),
+  bestIds: new Set(),
 };
 
 const els = {
@@ -27,6 +29,7 @@ const els = {
   selectionCount: document.getElementById('selectionCount'),
   shownCount: document.getElementById('shownCount'),
   selectAllShownBtn: document.getElementById('selectAllShownBtn'),
+  selectDupeLosersBtn: document.getElementById('selectDupeLosersBtn'),
   scoreSelectedBtn: document.getElementById('scoreSelectedBtn'),
   deleteSelectedBtn: document.getElementById('deleteSelectedBtn'),
   clearSelectionBtn: document.getElementById('clearSelectionBtn'),
@@ -67,6 +70,48 @@ const els = {
 };
 
 let currentBrowse = null; // last successful /api/browse response, for "Use this folder" / "Up"
+
+/**
+ * Reduces a card name to a comparison key, so near-identical characters land in
+ * the same group: case, punctuation, and the usual version/copy suffixes people
+ * end up with when collecting cards from several places.
+ */
+function dedupeKey(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/\.(png|json)$/i, '')
+    .replace(/[\[(<{].*?[\])>}]/g, ' ')      // (1), [v2], {final}
+    .replace(/\b(v|ver|version)\s*\d+(\.\d+)?\b/g, ' ')
+    .replace(/\b(copy|final|new|old|edit|edited|fixed|updated|rev|remake|alt)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+\d+\s*$/, ' ')             // trailing bare numbers
+    .trim();
+}
+
+/** Groups the loaded cards by dedupeKey; only groups with 2+ members matter. */
+function duplicateGroups() {
+  const groups = new Map();
+  for (const c of state.cards) {
+    const key = dedupeKey(c.name);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  for (const [key, list] of groups) if (list.length < 2) groups.delete(key);
+  return groups;
+}
+
+/** The highest-scoring card id in each duplicate group — the one worth keeping. */
+function bestOfEachGroup() {
+  const best = new Set();
+  for (const list of duplicateGroups().values()) {
+    const scored = list.filter((c) => c.overallScore != null);
+    const pool = scored.length ? scored : list;
+    const winner = pool.reduce((a, b) => ((b.overallScore ?? -1) > (a.overallScore ?? -1) ? b : a));
+    best.add(winner.id);
+  }
+  return best;
+}
 
 function scoreClass(score, error) {
   if (error) return 'score-error';
@@ -132,6 +177,7 @@ function renderStats() {
 
 function passesFilter(card) {
   const f = els.filterBy.value;
+  if (f === 'duplicates') return state.dupeIds.has(card.id);
   if (f === 'unscored') return card.overallScore == null || card.error;
   if (f === 'below4') return card.overallScore != null && card.overallScore < 4;
   if (f === 'below6') return card.overallScore != null && card.overallScore < 6;
@@ -164,8 +210,23 @@ function sortCards(cards) {
 
 function renderGrid() {
   const query = els.search.value.trim().toLowerCase();
+  const groups = duplicateGroups();
+  state.dupeIds = new Set([...groups.values()].flat().map((c) => c.id));
+  state.bestIds = bestOfEachGroup();
+
   let cards = state.cards.filter((c) => c.name.toLowerCase().includes(query) && passesFilter(c));
   cards = sortCards(cards);
+
+  // In the duplicates view, keep each group together and put the best first,
+  // so the keep/cull decision is a glance rather than a search.
+  if (els.filterBy.value === 'duplicates') {
+    cards.sort((a, b) => {
+      const ka = dedupeKey(a.name);
+      const kb = dedupeKey(b.name);
+      if (ka !== kb) return ka.localeCompare(kb);
+      return (b.overallScore ?? -1) - (a.overallScore ?? -1);
+    });
+  }
   state.shown = cards; // what "Select all shown" acts on
 
   els.grid.innerHTML = '';
@@ -215,6 +276,17 @@ function renderGrid() {
     const meta = document.createElement('div');
     meta.className = 'card-meta';
     meta.textContent = card.tokenEstimate != null ? `~${card.tokenEstimate} tok` : '';
+    if (state.dupeIds.has(card.id)) {
+      const tag = document.createElement('span');
+      const isBest = state.bestIds.has(card.id);
+      tag.className = `dupe-tag ${isBest ? 'dupe-best' : 'dupe-worse'}`;
+      tag.textContent = isBest ? 'BEST OF DUPES' : 'DUPLICATE';
+      tag.title = isBest
+        ? 'Highest-scoring card among others with a near-identical name.'
+        : 'Another card with a near-identical name scores higher.';
+      meta.appendChild(document.createElement('br'));
+      meta.appendChild(tag);
+    }
     info.appendChild(name);
     info.appendChild(meta);
     tile.appendChild(info);
@@ -232,6 +304,7 @@ function renderSelectionBar() {
   els.shownCount.textContent = `${shown.length} card${shown.length === 1 ? '' : 's'} shown`;
   els.selectAllShownBtn.textContent = allShownSelected ? 'Deselect all shown' : `Select all shown (${shown.length})`;
   els.selectAllShownBtn.classList.toggle('hidden', shown.length === 0);
+  els.selectDupeLosersBtn.classList.toggle('hidden', els.filterBy.value !== 'duplicates');
 
   els.selectionCount.textContent = n ? `${n} selected` : '';
   for (const btn of [els.scoreSelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]) {
@@ -530,6 +603,23 @@ els.exportScoresBtn.addEventListener('click', () => {
   document.body.appendChild(a);
   a.click();
   a.remove();
+});
+
+// The whole point of the duplicates view: keep the best of each near-identical
+// group and select the rest for culling, without hand-picking.
+els.selectDupeLosersBtn.addEventListener('click', () => {
+  const best = bestOfEachGroup();
+  let n = 0;
+  for (const list of duplicateGroups().values()) {
+    for (const card of list) {
+      if (!best.has(card.id)) {
+        state.selected.add(card.id);
+        n++;
+      }
+    }
+  }
+  renderGrid();
+  if (n === 0) alert('No duplicate groups found — every card name looks unique.');
 });
 
 els.selectAllShownBtn.addEventListener('click', () => {

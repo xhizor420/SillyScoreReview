@@ -30,6 +30,7 @@
     <option value="below4">Score below 4</option>
     <option value="below6">Score below 6</option>
     <option value="scored">Scored only</option>
+    <option value="duplicates">Possible duplicates</option>
   </select>
   <button id="scanUnscoredBtn" title="Scores every card with no score yet, including any that failed last time — no need to rescore everything.">Scan unscored</button>
   <button id="rescanAllBtn" class="secondary">Rescore all</button>
@@ -63,6 +64,7 @@
 <div class="selection-bar" id="selectionBar">
   <span id="shownCount" class="shown-count"></span>
   <button id="selectAllShownBtn" class="secondary">Select all shown</button>
+  <button id="selectDupeLosersBtn" class="secondary hidden" title="Selects every duplicate except the highest-scoring one in each group.">Select all but the best of each</button>
   <span id="selectionCount"></span>
   <button id="scoreSelectedBtn" class="hidden">Score selected</button>
   <button id="deleteSelectedBtn" class="danger hidden">Delete selected</button>

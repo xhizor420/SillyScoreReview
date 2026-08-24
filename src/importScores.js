@@ -18,7 +18,7 @@ import { Store } from './store.js';
  * NOT re-score them. Importing a number is the whole point — nobody wants to
  * pay to re-derive a score they already have.
  */
-export async function importScores({ cacheFile, charactersDir, payload, dryRun = false, overwrite = false }) {
+export async function importScores({ cacheFile, charactersDir, payload, dryRun = false, overwrite = false, onProgress }) {
   // Be liberal about shape: the snippet and the Export button both produce
   // { scores: [...] }, but a hand-made file could reasonably be a bare array,
   // a { cards: [...] }, or even a plain { "file.png": 7 } mapping.
@@ -107,7 +107,8 @@ export async function importScores({ cacheFile, charactersDir, payload, dryRun =
     }
 
     if (!dryRun) {
-      await store.set(file, {
+      // Staged, not written — a single save follows the loop.
+      store.stage(file, {
         hash: hashCard(card), // real hash => scan will not re-score this card
         name: card.name,
         tokenEstimate: totalCardTokens(card),
@@ -125,7 +126,10 @@ export async function importScores({ cacheFile, charactersDir, payload, dryRun =
       });
     }
     imported++;
+    if (onProgress && imported % 100 === 0) onProgress(imported, rows.length);
   }
+
+  if (!dryRun && imported > 0) await store.save();
 
   return {
     dest,

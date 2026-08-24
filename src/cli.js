@@ -376,7 +376,9 @@ async function main() {
         payload,
         dryRun: Boolean(args['dry-run']),
         overwrite: Boolean(args.overwrite),
+        onProgress: (n, total) => process.stdout.write(`\r  matching… ${n}/${total}`),
       });
+      process.stdout.write('\r'.padEnd(40) + '\r');
       console.log(`Target : ${r.dest}`);
       console.log(`${args['dry-run'] ? '\nDRY RUN — nothing written.' : ''}\n`);
       console.log(`  scores in file        : ${r.total}`);

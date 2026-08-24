@@ -42,6 +42,21 @@ export class Store {
     return this._queueSave();
   }
 
+  /**
+   * Stages an entry without writing. Every `set` rewrites the whole file, which
+   * is right for a scan (each card should be durable the moment it finishes)
+   * but pathological for a bulk import — a few thousand entries becomes a few
+   * thousand full-file writes and looks like a hang. Stage, then `save()` once.
+   */
+  stage(key, value) {
+    this.data.cards[key] = value;
+  }
+
+  /** Writes whatever has been staged. */
+  save() {
+    return this._queueSave();
+  }
+
   delete(key) {
     delete this.data.cards[key];
     return this._queueSave();

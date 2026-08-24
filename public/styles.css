@@ -182,6 +182,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .card-info { padding: 8px; }
 .card-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.dupe-tag {
+  display: inline-block; margin-top: 3px; padding: 1px 5px;
+  border-radius: 4px; font-size: 9.5px; font-weight: 700; letter-spacing: 0.03em;
+}
+.dupe-best { background: rgba(79,191,122,0.15); color: var(--green); border: 1px solid var(--green); }
+.dupe-worse { background: rgba(229,88,107,0.12); color: var(--red); border: 1px solid var(--red); }
 
 .card-checkbox {
   position: absolute;
