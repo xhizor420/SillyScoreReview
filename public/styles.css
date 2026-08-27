@@ -188,6 +188,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .dupe-best { background: rgba(79,191,122,0.15); color: var(--green); border: 1px solid var(--green); }
 .dupe-worse { background: rgba(229,88,107,0.12); color: var(--red); border: 1px solid var(--red); }
+.dupe-link { cursor: pointer; font-family: inherit; }
+.dupe-link:hover { filter: brightness(1.35); text-decoration: underline; }
+
+.focus-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 12px 20px 0; padding: 9px 12px;
+  background: rgba(124,156,255,0.10);
+  border: 1px solid var(--accent); border-radius: 6px;
+  font-size: 13px;
+}
+.focus-bar #focusLabel { flex: 1; min-width: 200px; }
+.hint-shift { opacity: 0.65; font-style: italic; }
 
 .card-checkbox {
   position: absolute;

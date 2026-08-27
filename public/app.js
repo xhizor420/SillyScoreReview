@@ -4,6 +4,9 @@ const state = {
   selected: new Set(),
   dupeIds: new Set(),
   bestIds: new Set(),
+  groupSizes: new Map(),  // dedupeKey -> how many cards share it
+  focusKey: null,         // when set, show only that name group
+  lastToggledIndex: null, // anchor for shift-click range selection
 };
 
 const els = {
@@ -30,6 +33,10 @@ const els = {
   shownCount: document.getElementById('shownCount'),
   selectAllShownBtn: document.getElementById('selectAllShownBtn'),
   selectDupeLosersBtn: document.getElementById('selectDupeLosersBtn'),
+  focusBar: document.getElementById('focusBar'),
+  focusLabel: document.getElementById('focusLabel'),
+  clearFocusBtn: document.getElementById('clearFocusBtn'),
+  selectFocusLosersBtn: document.getElementById('selectFocusLosersBtn'),
   scoreSelectedBtn: document.getElementById('scoreSelectedBtn'),
   deleteSelectedBtn: document.getElementById('deleteSelectedBtn'),
   clearSelectionBtn: document.getElementById('clearSelectionBtn'),
@@ -85,7 +92,7 @@ function dedupeKey(name) {
     .replace(/\b(copy|final|new|old|edit|edited|fixed|updated|rev|remake|alt)\b/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+\d+\s*$/, ' ')             // trailing bare numbers
-    .trim();
+    .replace(/\s+/g, '');                    // "Cream Heart" === "CreamHeart"
 }
 
 /** Groups the loaded cards by dedupeKey; only groups with 2+ members matter. */
@@ -176,6 +183,9 @@ function renderStats() {
 }
 
 function passesFilter(card) {
+  // Focusing one name group overrides the dropdown — you asked to see these
+  // specific cards, so show all of them regardless of score/scored state.
+  if (state.focusKey) return dedupeKey(card.name) === state.focusKey;
   const f = els.filterBy.value;
   if (f === 'duplicates') return state.dupeIds.has(card.id);
   if (f === 'unscored') return card.overallScore == null || card.error;
@@ -213,13 +223,14 @@ function renderGrid() {
   const groups = duplicateGroups();
   state.dupeIds = new Set([...groups.values()].flat().map((c) => c.id));
   state.bestIds = bestOfEachGroup();
+  state.groupSizes = new Map([...groups.entries()].map(([k, v]) => [k, v.length]));
 
   let cards = state.cards.filter((c) => c.name.toLowerCase().includes(query) && passesFilter(c));
   cards = sortCards(cards);
 
   // In the duplicates view, keep each group together and put the best first,
   // so the keep/cull decision is a glance rather than a search.
-  if (els.filterBy.value === 'duplicates') {
+  if (els.filterBy.value === 'duplicates' || state.focusKey) {
     cards.sort((a, b) => {
       const ka = dedupeKey(a.name);
       const kb = dedupeKey(b.name);
@@ -233,7 +244,7 @@ function renderGrid() {
   els.emptyState.classList.toggle('hidden', cards.length > 0);
   renderSelectionBar();
 
-  for (const card of cards) {
+  cards.forEach((card, index) => {
     const tile = document.createElement('div');
     tile.className = 'card-tile';
 
@@ -241,7 +252,26 @@ function renderGrid() {
     checkbox.type = 'checkbox';
     checkbox.className = 'card-checkbox';
     checkbox.checked = state.selected.has(card.id);
-    checkbox.addEventListener('click', (e) => e.stopPropagation());
+    checkbox.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Shift-click selects everything between the last box you touched and
+      // this one — ticking a few hundred boxes individually is not a workflow.
+      if (e.shiftKey && state.lastToggledIndex != null) {
+        const from = Math.min(state.lastToggledIndex, index);
+        const to = Math.max(state.lastToggledIndex, index);
+        const turningOn = !state.selected.has(card.id);
+        for (let i = from; i <= to; i++) {
+          const id = state.shown[i].id;
+          if (turningOn) state.selected.add(id);
+          else state.selected.delete(id);
+        }
+        state.lastToggledIndex = index;
+        e.preventDefault();
+        renderGrid();
+        return;
+      }
+      state.lastToggledIndex = index;
+    });
     checkbox.addEventListener('change', () => {
       if (checkbox.checked) state.selected.add(card.id);
       else state.selected.delete(card.id);
@@ -277,15 +307,21 @@ function renderGrid() {
     meta.className = 'card-meta';
     meta.textContent = card.tokenEstimate != null ? `~${card.tokenEstimate} tok` : '';
     if (state.dupeIds.has(card.id)) {
-      const tag = document.createElement('span');
+      const key = dedupeKey(card.name);
       const isBest = state.bestIds.has(card.id);
-      tag.className = `dupe-tag ${isBest ? 'dupe-best' : 'dupe-worse'}`;
-      tag.textContent = isBest ? 'BEST OF DUPES' : 'DUPLICATE';
-      tag.title = isBest
-        ? 'Highest-scoring card among others with a near-identical name.'
-        : 'Another card with a near-identical name scores higher.';
       meta.appendChild(document.createElement('br'));
-      meta.appendChild(tag);
+
+      // Click to pull up every card sharing this name — the "I have 5 Ravens,
+      // show me just those" action, done from the card itself.
+      const chip = document.createElement('button');
+      chip.className = `dupe-tag dupe-link ${isBest ? 'dupe-best' : 'dupe-worse'}`;
+      chip.textContent = `${state.groupSizes.get(key) || 2} SAME NAME${isBest ? ' · BEST' : ''}`;
+      chip.title = `Show only the ${state.groupSizes.get(key) || 2} cards named like "${card.name}"`;
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        focusGroup(key);
+      });
+      meta.appendChild(chip);
     }
     info.appendChild(name);
     info.appendChild(meta);
@@ -293,7 +329,34 @@ function renderGrid() {
 
     tile.addEventListener('click', () => openCard(card.id));
     els.grid.appendChild(tile);
+  });
+}
+
+function focusGroup(key) {
+  state.focusKey = key;
+  state.lastToggledIndex = null;
+  els.search.value = '';
+  renderGrid();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function clearFocus() {
+  state.focusKey = null;
+  state.lastToggledIndex = null;
+  renderGrid();
+}
+
+function renderFocusBar() {
+  if (!state.focusKey) {
+    els.focusBar.classList.add('hidden');
+    return;
   }
+  const list = state.shown;
+  const best = list.find((c) => state.bestIds.has(c.id));
+  els.focusBar.classList.remove('hidden');
+  els.focusLabel.textContent =
+    `Showing ${list.length} cards named like "${list[0]?.name ?? state.focusKey}"` +
+    (best?.overallScore != null ? ` — best is ${best.name} at ${best.overallScore}/10` : '');
 }
 
 function renderSelectionBar() {
@@ -305,6 +368,7 @@ function renderSelectionBar() {
   els.selectAllShownBtn.textContent = allShownSelected ? 'Deselect all shown' : `Select all shown (${shown.length})`;
   els.selectAllShownBtn.classList.toggle('hidden', shown.length === 0);
   els.selectDupeLosersBtn.classList.toggle('hidden', els.filterBy.value !== 'duplicates');
+  renderFocusBar();
 
   els.selectionCount.textContent = n ? `${n} selected` : '';
   for (const btn of [els.scoreSelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]) {
@@ -537,7 +601,17 @@ async function loadTrash() {
 
 els.search.addEventListener('input', renderGrid);
 els.sortBy.addEventListener('change', renderGrid);
-els.filterBy.addEventListener('change', renderGrid);
+els.filterBy.addEventListener('change', () => {
+  state.focusKey = null;
+  renderGrid();
+});
+els.clearFocusBtn.addEventListener('click', clearFocus);
+els.selectFocusLosersBtn.addEventListener('click', () => {
+  for (const card of state.shown) {
+    if (!state.bestIds.has(card.id)) state.selected.add(card.id);
+  }
+  renderGrid();
+});
 
 els.scanUnscoredBtn.addEventListener('click', () => startBatch({ scope: 'unscored' }));
 els.rescanAllBtn.addEventListener('click', () => {

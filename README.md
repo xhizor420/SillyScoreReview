@@ -46,17 +46,28 @@ their score with a note and can be rescored individually if you want the detail 
 To avoid needing this again, the dashboard now has an **Export scores** button that saves
 the same JSON on demand — worth doing after a long run. `import-scores` restores it.
 
-## Comparing duplicate characters
+## Selecting a lot of cards quickly
 
-Collections gather the same character several times — `Aria`, `Aria v2`, `aria (1)`,
-`Kaelen - copy`. Filter to **Possible duplicates**: cards with near-identical names are
-grouped together, highest score first, each tagged **BEST OF DUPES** or **DUPLICATE**.
-So the "same vibes, but this one scores higher" decision is a glance.
+- **Shift-click** a checkbox to select everything between it and the last one you
+  clicked. Ticking a few hundred boxes one at a time is not a workflow.
+- **Select all shown** takes whatever the current filter/search is displaying.
 
-Then **Select all but the best of each** picks every duplicate except the top scorer in
-its group, and **Delete selected** culls them. Cards with a unique name are never
-touched. Name matching ignores case, punctuation, bracketed bits, and the usual
-`v2`/`copy`/`final`/`edited` suffixes.
+## Finding and culling the same character
+
+If you have five Ravens and six Cream Hearts, any card that shares a name with others
+shows a clickable **"5 SAME NAME"** chip. Click it and the grid narrows to just that
+group, best score first, with a bar reading *"Showing 5 cards named like Raven — best is
+Raven v2 at 8/10"*. **Select all but the best** then selects the rest so you can delete
+them and keep the one worth improving. **Show all cards** returns to the full grid.
+
+To sweep every group at once instead, filter to **Possible duplicates**: all grouped
+cards appear together, each tagged **BEST** or **DUPLICATE**, and **Select all but the
+best of each** handles the whole collection in one click.
+
+Name matching is purely textual — no AI, no image comparison. It ignores case,
+punctuation, spacing (`CreamHeart` = `Cream Heart`), bracketed bits like `(1)` or `[v2]`,
+and `v2`/`copy`/`final`/`edited` suffixes. Cards with a unique name are never grouped or
+selected. Deletion still goes to `data/trash/` and is reversible.
 
 To re-score cards that have no score or that failed, filter to **Unscored / errored
 only** — then either **Scan unscored** (does the whole set) or select individual cards
