@@ -308,3 +308,62 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .settings-field .folder-path-row { margin-top: 0; }
 .settings-field .folder-path-row select { flex: 1; }
 #settingsModelCustom { margin-top: 6px; }
+
+
+/* ---------------------------------------------------------------------------
+   Touch + small screens. The dashboard is genuinely useful from a phone over
+   Tailscale, so the controls have to be reachable with a thumb: bigger tap
+   targets, a toolbar that wraps instead of overflowing, and side panels that
+   become full-width sheets rather than a 340px column off the edge.
+   --------------------------------------------------------------------------- */
+
+/* Select mode: tapping a tile selects it instead of opening it. Shift-click
+   has no touch equivalent, so this is how you pick many cards on a phone. */
+body.select-mode .card-tile { cursor: copy; }
+body.select-mode .card-tile.is-selected {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+body.select-mode .card-checkbox { width: 26px; height: 26px; }
+#selectModeBtn.active {
+  background: var(--accent);
+  color: #10121a;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .topbar { flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 12px; }
+  .topbar-title { flex-direction: column; align-items: flex-start; gap: 0; }
+  .dir-label { word-break: break-all; font-size: 11px; }
+
+  .toolbar { padding: 8px 12px; gap: 6px; }
+  .toolbar button, .toolbar select, .toolbar input { min-height: 42px; font-size: 14px; }
+  #search { flex: 1 1 100%; }
+  .toolbar select { flex: 1 1 45%; }
+  .toolbar button { flex: 1 1 45%; }
+
+  .grid { grid-template-columns: repeat(auto-fill, minmax(115px, 1fr)); gap: 8px; padding: 10px 12px; }
+  .card-checkbox { width: 24px; height: 24px; top: 4px; left: 4px; }
+  .score-badge { min-width: 28px; height: 24px; font-size: 13px; }
+  .card-name { font-size: 12px; }
+
+  .selection-bar, .focus-bar, .scan-panel { margin: 8px 12px 0; }
+  .selection-bar { flex-wrap: wrap; gap: 8px; }
+  .selection-bar button { min-height: 42px; flex: 1 1 45%; }
+  .hint-shift { display: none; }
+
+  .scan-columns { grid-template-columns: 1fr; }
+  .scan-stats { gap: 12px; }
+  .scan-stat b { font-size: 15px; }
+
+  /* Side panels become full-screen sheets. */
+  .trash-panel { width: 100%; max-width: 100%; }
+  .modal { padding: 16px; }
+  .modal-actions button { min-height: 44px; flex: 1; }
+}
+
+@media (max-width: 420px) {
+  .grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+  .toolbar button, .toolbar select { flex: 1 1 100%; }
+}

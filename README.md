@@ -64,10 +64,31 @@ To sweep every group at once instead, filter to **Possible duplicates**: all gro
 cards appear together, each tagged **BEST** or **DUPLICATE**, and **Select all but the
 best of each** handles the whole collection in one click.
 
-Name matching is purely textual — no AI, no image comparison. It ignores case,
-punctuation, spacing (`CreamHeart` = `Cream Heart`), bracketed bits like `(1)` or `[v2]`,
-and `v2`/`copy`/`final`/`edited` suffixes. Cards with a unique name are never grouped or
-selected. Deletion still goes to `data/trash/` and is reversible.
+Name matching is purely textual — no AI, no image comparison — and covers the three ways
+collections actually drift apart:
+
+| | |
+|---|---|
+| formatting | `Cream Heart` = `CreamHeart` = `cream heart (1)` = `Cream Heart v2` |
+| a source tag glued on | `Malo` = `SCPMalo` = `SCP Malo v2` |
+| one name inside a longer one | `Mira` = `Mira Solace` |
+| small spelling drift | `Kaelen` = `Kaelan` |
+
+Short names are held to stricter rules so genuinely different characters don't merge —
+`Nyx` and `Onyx` stay separate. Cards with a unique name are never grouped or selected,
+and deletion still goes to `data/trash/` and is reversible.
+
+## Using it from your phone
+
+The dashboard works from a phone over Tailscale — browse, score, compare and delete, all
+of it. Run the server on the PC holding your cards, then open
+`http://<that machine's tailscale name>:4180` on your phone. See the Tailscale section
+below for setup, and **set an `authToken`** before doing this so only you can reach it.
+
+On a phone the layout switches to a denser grid with thumb-sized controls, and side
+panels become full-screen sheets. Shift-click has no touch equivalent, so tap
+**Select mode** — while it's on, tapping a card selects it instead of opening it, which
+is how you pick a lot of cards to delete. Tap it again to go back to tap-to-open.
 
 To re-score cards that have no score or that failed, filter to **Unscored / errored
 only** — then either **Scan unscored** (does the whole set) or select individual cards

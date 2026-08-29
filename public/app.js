@@ -4,9 +4,12 @@ const state = {
   selected: new Set(),
   dupeIds: new Set(),
   bestIds: new Set(),
-  groupSizes: new Map(),  // dedupeKey -> how many cards share it
+  groups: new Map(),      // representative key -> cards in that group
+  groupOf: new Map(),     // card id -> its group's representative key
+  groupSizes: new Map(),  // representative key -> how many cards share it
   focusKey: null,         // when set, show only that name group
   lastToggledIndex: null, // anchor for shift-click range selection
+  selectMode: false,      // touch: tap a tile to select rather than open it
 };
 
 const els = {
@@ -31,6 +34,7 @@ const els = {
   selectionBar: document.getElementById('selectionBar'),
   selectionCount: document.getElementById('selectionCount'),
   shownCount: document.getElementById('shownCount'),
+  selectModeBtn: document.getElementById('selectModeBtn'),
   selectAllShownBtn: document.getElementById('selectAllShownBtn'),
   selectDupeLosersBtn: document.getElementById('selectDupeLosersBtn'),
   focusBar: document.getElementById('focusBar'),
@@ -79,9 +83,8 @@ const els = {
 let currentBrowse = null; // last successful /api/browse response, for "Use this folder" / "Up"
 
 /**
- * Reduces a card name to a comparison key, so near-identical characters land in
- * the same group: case, punctuation, and the usual version/copy suffixes people
- * end up with when collecting cards from several places.
+ * Reduces a card name to a comparison key: case, punctuation, spacing, and the
+ * usual version/copy suffixes people accumulate when collecting cards.
  */
 function dedupeKey(name) {
   return String(name || '')
@@ -95,29 +98,117 @@ function dedupeKey(name) {
     .replace(/\s+/g, '');                    // "Cream Heart" === "CreamHeart"
 }
 
-/** Groups the loaded cards by dedupeKey; only groups with 2+ members matter. */
-function duplicateGroups() {
-  const groups = new Map();
-  for (const c of state.cards) {
-    const key = dedupeKey(c.name);
-    if (!key) continue;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(c);
+// Collection labels that get glued onto a character's name. "SCPMalo" is the
+// same character as "Malo"; the prefix is a source tag, not part of who they are.
+const NAME_AFFIXES = ['scp', 'oc', 'nsfw', 'sfw', 'ai', 'bot', 'char', 'card', 'the', 'my'];
+function stripAffixes(key) {
+  let out = key;
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const a of NAME_AFFIXES) {
+      if (out.length > a.length + 3 && out.startsWith(a)) { out = out.slice(a.length); changed = true; }
+      if (out.length > a.length + 3 && out.endsWith(a)) { out = out.slice(0, -a.length); changed = true; }
+    }
   }
-  for (const [key, list] of groups) if (list.length < 2) groups.delete(key);
-  return groups;
+  return out;
 }
 
-/** The highest-scoring card id in each duplicate group — the one worth keeping. */
-function bestOfEachGroup() {
-  const best = new Set();
-  for (const list of duplicateGroups().values()) {
+/** True when the edit distance between a and b is at most max. Bails early. */
+function editDistanceAtMost(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return false;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > max) return false;
+    prev = cur;
+  }
+  return prev[b.length] <= max;
+}
+
+/**
+ * Whether two normalized names are the same character. Deliberately textual —
+ * no AI, no image comparison — but it catches the three ways collections
+ * actually differ: a source tag glued on (Malo / SCPMalo), one name contained
+ * in a longer one (Mira / Mira Solace), and small spelling drift
+ * (Kaelen / Kaelan). Short names are held to stricter rules so genuinely
+ * different characters (Nyx / Onyx) do not merge.
+ */
+function namesSimilar(a, b) {
+  if (a === b) return true;
+  const sa = stripAffixes(a);
+  const sb = stripAffixes(b);
+  if (sa === sb && sa.length >= 3) return true;
+
+  const [short, long] = sa.length <= sb.length ? [sa, sb] : [sb, sa];
+  if (short.length >= 4 && long.includes(short) && short.length / long.length >= 0.4) return true;
+
+  const maxEdits = short.length >= 8 ? 2 : short.length >= 5 ? 1 : 0;
+  return maxEdits > 0 && editDistanceAtMost(sa, sb, maxEdits);
+}
+
+/**
+ * Groups cards by similar name using union-find. Computed once per card list
+ * (cached in state) rather than per render — it is O(n^2)-ish over unique keys
+ * and would otherwise re-run on every keystroke in the search box.
+ */
+function computeGroups() {
+  const keyOf = new Map();
+  for (const c of state.cards) keyOf.set(c.id, dedupeKey(c.name));
+
+  const uniq = [...new Set(keyOf.values())].filter(Boolean);
+  const stripped = uniq.map(stripAffixes);
+  const order = uniq.map((_, i) => i).sort((a, b) => stripped[a].length - stripped[b].length);
+
+  const parent = uniq.map((_, i) => i);
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const union = (a, b) => { const ra = find(a); const rb = find(b); if (ra !== rb) parent[rb] = ra; };
+
+  for (let oi = 0; oi < order.length; oi++) {
+    const i = order[oi];
+    const si = stripped[i];
+    for (let oj = oi + 1; oj < order.length; oj++) {
+      const j = order[oj];
+      // Sorted by length, so once a candidate is too long to satisfy either the
+      // containment ratio or the edit budget, nothing after it can match either.
+      if (stripped[j].length > si.length / 0.4 && stripped[j].length - si.length > 2) break;
+      if (namesSimilar(uniq[i], uniq[j])) union(i, j);
+    }
+  }
+
+  // Map every card to its group's representative key.
+  const keyToRoot = new Map();
+  uniq.forEach((k, i) => keyToRoot.set(k, uniq[find(i)]));
+
+  const groups = new Map();
+  for (const card of state.cards) {
+    const root = keyToRoot.get(keyOf.get(card.id));
+    if (!root) continue;
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(card);
+  }
+  for (const [k, list] of groups) if (list.length < 2) groups.delete(k);
+
+  state.groupOf = new Map();
+  state.dupeIds = new Set();
+  state.bestIds = new Set();
+  state.groupSizes = new Map();
+  for (const [root, list] of groups) {
     const scored = list.filter((c) => c.overallScore != null);
     const pool = scored.length ? scored : list;
     const winner = pool.reduce((a, b) => ((b.overallScore ?? -1) > (a.overallScore ?? -1) ? b : a));
-    best.add(winner.id);
+    state.bestIds.add(winner.id);
+    state.groupSizes.set(root, list.length);
+    for (const c of list) {
+      state.dupeIds.add(c.id);
+      state.groupOf.set(c.id, root);
+    }
   }
-  return best;
+  state.groups = groups;
 }
 
 function scoreClass(score, error) {
@@ -168,6 +259,7 @@ async function loadCards() {
   const data = await api('/api/cards');
   state.cards = data.cards;
   els.dirLabel.textContent = data.charactersDir;
+  computeGroups();   // once per load, not per render
   renderStats();
   renderGrid();
 }
@@ -185,7 +277,7 @@ function renderStats() {
 function passesFilter(card) {
   // Focusing one name group overrides the dropdown — you asked to see these
   // specific cards, so show all of them regardless of score/scored state.
-  if (state.focusKey) return dedupeKey(card.name) === state.focusKey;
+  if (state.focusKey) return state.groupOf.get(card.id) === state.focusKey;
   const f = els.filterBy.value;
   if (f === 'duplicates') return state.dupeIds.has(card.id);
   if (f === 'unscored') return card.overallScore == null || card.error;
@@ -220,10 +312,6 @@ function sortCards(cards) {
 
 function renderGrid() {
   const query = els.search.value.trim().toLowerCase();
-  const groups = duplicateGroups();
-  state.dupeIds = new Set([...groups.values()].flat().map((c) => c.id));
-  state.bestIds = bestOfEachGroup();
-  state.groupSizes = new Map([...groups.entries()].map(([k, v]) => [k, v.length]));
 
   let cards = state.cards.filter((c) => c.name.toLowerCase().includes(query) && passesFilter(c));
   cards = sortCards(cards);
@@ -232,8 +320,8 @@ function renderGrid() {
   // so the keep/cull decision is a glance rather than a search.
   if (els.filterBy.value === 'duplicates' || state.focusKey) {
     cards.sort((a, b) => {
-      const ka = dedupeKey(a.name);
-      const kb = dedupeKey(b.name);
+      const ka = state.groupOf.get(a.id) || '';
+      const kb = state.groupOf.get(b.id) || '';
       if (ka !== kb) return ka.localeCompare(kb);
       return (b.overallScore ?? -1) - (a.overallScore ?? -1);
     });
@@ -307,7 +395,7 @@ function renderGrid() {
     meta.className = 'card-meta';
     meta.textContent = card.tokenEstimate != null ? `~${card.tokenEstimate} tok` : '';
     if (state.dupeIds.has(card.id)) {
-      const key = dedupeKey(card.name);
+      const key = state.groupOf.get(card.id);
       const isBest = state.bestIds.has(card.id);
       meta.appendChild(document.createElement('br'));
 
@@ -327,7 +415,19 @@ function renderGrid() {
     info.appendChild(meta);
     tile.appendChild(info);
 
-    tile.addEventListener('click', () => openCard(card.id));
+    if (state.selected.has(card.id)) tile.classList.add('is-selected');
+    tile.addEventListener('click', () => {
+      // On a phone there is no shift-click, so Select mode turns a plain tap
+      // into a selection toggle instead of opening the card.
+      if (state.selectMode) {
+        if (state.selected.has(card.id)) state.selected.delete(card.id);
+        else state.selected.add(card.id);
+        state.lastToggledIndex = index;
+        renderGrid();
+        return;
+      }
+      openCard(card.id);
+    });
     els.grid.appendChild(tile);
   });
 }
@@ -659,6 +759,14 @@ els.clearSelectionBtn.addEventListener('click', () => {
 // workflow. This selects/deselects exactly what the current filter+search shows.
 els.hideScanPanelBtn.addEventListener('click', () => els.scanPanel.classList.add('hidden'));
 
+els.selectModeBtn.addEventListener('click', () => {
+  state.selectMode = !state.selectMode;
+  els.selectModeBtn.classList.toggle('active', state.selectMode);
+  document.body.classList.toggle('select-mode', state.selectMode);
+  els.selectModeBtn.textContent = state.selectMode ? 'Select mode: ON' : 'Select mode';
+  renderGrid();
+});
+
 // A local backup of just the score numbers. Cheap insurance: if the data file
 // is ever lost or split, these can be imported back without re-paying for the
 // scoring (node src/cli.js import-scores <file>).
@@ -682,18 +790,14 @@ els.exportScoresBtn.addEventListener('click', () => {
 // The whole point of the duplicates view: keep the best of each near-identical
 // group and select the rest for culling, without hand-picking.
 els.selectDupeLosersBtn.addEventListener('click', () => {
-  const best = bestOfEachGroup();
   let n = 0;
-  for (const list of duplicateGroups().values()) {
+  for (const list of state.groups.values()) {
     for (const card of list) {
-      if (!best.has(card.id)) {
-        state.selected.add(card.id);
-        n++;
-      }
+      if (!state.bestIds.has(card.id)) { state.selected.add(card.id); n++; }
     }
   }
   renderGrid();
-  if (n === 0) alert('No duplicate groups found — every card name looks unique.');
+  if (n === 0) alert('No similar-name groups found — every card name looks unique.');
 });
 
 els.selectAllShownBtn.addEventListener('click', () => {
