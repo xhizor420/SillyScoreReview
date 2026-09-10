@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
-import { readFile, writeFile, readdir, rename, unlink, stat, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, readdir, rename, unlink, stat, mkdir, copyFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
@@ -358,6 +358,100 @@ export async function startServer(config) {
       }
     }
     res.json({ moved, errors });
+  });
+
+  // Copy (never move) selected cards into another folder, so a curated "keepers"
+  // set can be built up without touching the library being reviewed. Scores
+  // travel with the cards: the destination folder's own cache gets an entry for
+  // each copied file, so pointing the tool at that folder later still shows what
+  // every card scored instead of demanding a full rescan.
+  app.post('/api/cards/copy', async (req, res) => {
+    const { ids = [], destination = '' } = req.body || {};
+    const target = path.resolve(String(destination));
+    if (!destination) return res.status(400).json({ error: 'No destination folder given' });
+    if (target === path.resolve(config.charactersDir)) {
+      return res.status(400).json({ error: 'Destination is the folder you are reviewing — pick a different one.' });
+    }
+
+    try {
+      await mkdir(target, { recursive: true });
+      const st = await stat(target);
+      if (!st.isDirectory()) throw new Error('Not a directory');
+    } catch (err) {
+      return res.status(400).json({ error: `Cannot use "${target}": ${err.message}` });
+    }
+
+    const store = await getStore(config.charactersDir);
+    let destStore;
+    try {
+      destStore = await getStore(target);
+    } catch {
+      destStore = null; // copying still works even if the destination cache can't be opened
+    }
+
+    const copied = [];
+    const skipped = [];
+    const errors = [];
+
+    for (const file of ids) {
+      try {
+        const src = safeJoin(config.charactersDir, file);
+        let destName = file;
+        let dest = safeJoin(target, destName);
+
+        // Never overwrite. An identical file is already there → nothing to do.
+        // A *different* file under the same name gets a suffix, so two unrelated
+        // cards that happen to share a filename both survive.
+        let alreadyThere = false;
+        try {
+          await stat(dest);
+          const [a, b] = await Promise.all([readFile(src), readFile(dest)]);
+          if (a.equals(b)) {
+            alreadyThere = true;
+          } else {
+            const ext = path.extname(file);
+            const base = file.slice(0, file.length - ext.length);
+            let n = 2;
+            for (;;) {
+              destName = `${base} (${n})${ext}`;
+              dest = safeJoin(target, destName);
+              try {
+                await stat(dest);
+                n += 1;
+              } catch {
+                break;
+              }
+            }
+          }
+        } catch {
+          // nothing at the destination name — copy straight across
+        }
+
+        if (alreadyThere) {
+          skipped.push({ file, reason: 'already in destination' });
+        } else {
+          await copyFile(src, dest);
+          copied.push({ file, copiedAs: destName });
+        }
+
+        const entry = store.get(file);
+        if (destStore && entry && !destStore.get(destName)) {
+          destStore.stage(destName, entry);
+        }
+      } catch (err) {
+        errors.push({ file, error: err.message });
+      }
+    }
+
+    if (destStore) {
+      try {
+        await destStore.save();
+      } catch (err) {
+        errors.push({ file: '(scores)', error: `Cards copied, but their scores could not be saved to the destination cache: ${err.message}` });
+      }
+    }
+
+    res.json({ destination: target, copied, skipped, errors });
   });
 
   app.get('/api/trash', async (req, res) => {

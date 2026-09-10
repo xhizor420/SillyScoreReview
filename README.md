@@ -78,6 +78,30 @@ Short names are held to stricter rules so genuinely different characters don't m
 `Nyx` and `Onyx` stay separate. Cards with a unique name are never grouped or selected,
 and deletion still goes to `data/trash/` and is reversible.
 
+## Copying keepers into another folder
+
+Selection isn't only for deleting. With cards selected, **Copy selected to…** opens the
+folder browser in copy mode: pick (or type) a destination and hit **Copy here**. The
+files are *copied* — the originals and their scores stay exactly where they are, and the
+folder you're reviewing does not change.
+
+A path that doesn't exist yet is created, so you can type
+`C:\Users\you\Desktop\Keepers` and have the folder made on the spot. Typical uses:
+
+- filter to **Score below 4**, **Select all shown**, and copy them somewhere as a staging
+  area before you decide to delete them;
+- sort **Score: high → low**, select the top of the list, and copy your best cards
+  straight into SillyTavern's own `characters` folder;
+- pull a group of same-name duplicates aside to compare before merging them by hand.
+
+Nothing is ever overwritten. A card already in the destination (byte-identical) is
+skipped and reported as *already there*; a **different** card that happens to share a
+filename is copied as `Name (2).png` so both survive.
+
+Scores travel with the copies. The destination folder gets its own score cache entries
+for the cards you copied, so pointing the dashboard at that folder later shows the same
+scores instead of demanding a rescan.
+
 ## Using it from your phone
 
 The dashboard works from a phone over Tailscale — browse, score, compare and delete, all
@@ -88,7 +112,8 @@ below for setup, and **set an `authToken`** before doing this so only you can re
 On a phone the layout switches to a denser grid with thumb-sized controls, and side
 panels become full-screen sheets. Shift-click has no touch equivalent, so tap
 **Select mode** — while it's on, tapping a card selects it instead of opening it, which
-is how you pick a lot of cards to delete. Tap it again to go back to tap-to-open.
+is how you pick a lot of cards to delete or copy. Tap it again to go back to
+tap-to-open.
 
 To re-score cards that have no score or that failed, filter to **Unscored / errored
 only** — then either **Scan unscored** (does the whole set) or select individual cards

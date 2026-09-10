@@ -1,7 +1,7 @@
 // Offline pipeline check: builds fake card fixtures, runs a full scan with
 // the mock provider (no network/API cost), and sanity-checks the results.
 // Run with: node test/selftest.js
-import { mkdtemp, writeFile, rm, readFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, readFile, mkdir, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -237,6 +237,72 @@ async function main() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: charactersDir }),
     });
+
+    // copy selected cards into another folder: originals untouched, scores carried
+    const keepersDir = path.join(dir, 'keepers');
+    const copyRes = await fetch('http://localhost:4180/api/cards/copy', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: ['good-card.png', 'bloated-card.png'], destination: keepersDir }),
+    });
+    const copy = await copyRes.json();
+    assert.equal(copy.errors.length, 0, `copy reported errors: ${JSON.stringify(copy.errors)}`);
+    assert.equal(copy.copied.length, 2);
+    assert.deepEqual((await readdir(keepersDir)).sort(), ['bloated-card.png', 'good-card.png']);
+    console.log('✓ server copies selected cards into a destination folder it creates on demand');
+
+    const listAfterCopy = await (await fetch('http://localhost:4180/api/cards')).json();
+    assert.equal(listAfterCopy.cards.length, 2, 'copying must not remove the originals');
+    assert.ok(listAfterCopy.cards.every((c) => c.overallScore != null), 'originals keep their scores');
+    console.log('✓ the originals and their scores are left exactly as they were');
+
+    // the copies arrive already scored — pointing the tool at the new folder
+    // must not demand a rescan of cards that were just scored
+    await fetch('http://localhost:4180/api/settings/characters-dir', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: keepersDir }),
+    });
+    const listInKeepers = await (await fetch('http://localhost:4180/api/cards')).json();
+    assert.equal(listInKeepers.cards.length, 2);
+    assert.ok(listInKeepers.cards.every((c) => c.overallScore != null), 'copied cards should arrive with their scores');
+    console.log('✓ scores travel with the copies, so the destination folder needs no rescan');
+
+    await fetch('http://localhost:4180/api/settings/characters-dir', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: charactersDir }),
+    });
+
+    // copying the same cards again is a no-op, not a pile of duplicates
+    const copyAgain = await (await fetch('http://localhost:4180/api/cards/copy', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: ['good-card.png', 'bloated-card.png'], destination: keepersDir }),
+    })).json();
+    assert.equal(copyAgain.copied.length, 0);
+    assert.equal(copyAgain.skipped.length, 2);
+    assert.deepEqual((await readdir(keepersDir)).sort(), ['bloated-card.png', 'good-card.png']);
+    console.log('✓ re-copying the same cards skips them instead of duplicating them');
+
+    // a *different* card that happens to share a filename must not be overwritten
+    const clashDir = path.join(dir, 'clash');
+    await mkdir(clashDir, { recursive: true });
+    await writeFile(path.join(clashDir, 'good-card.png'), buildFakePng({ ...goodCard, data: { ...goodCard.data, name: 'A Totally Different Card' } }));
+    const copyClash = await (await fetch('http://localhost:4180/api/cards/copy', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: ['good-card.png'], destination: clashDir }),
+    })).json();
+    assert.equal(copyClash.copied.length, 1);
+    assert.equal(copyClash.copied[0].copiedAs, 'good-card (2).png');
+    const clashOriginal = await extractCardFromPng(await readFile(path.join(clashDir, 'good-card.png')));
+    assert.equal(clashOriginal.name, 'A Totally Different Card', 'an unrelated card with the same filename must survive');
+    console.log('✓ a filename clash gets a suffix instead of overwriting the card already there');
+
+    const copySelf = await fetch('http://localhost:4180/api/cards/copy', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: ['good-card.png'], destination: charactersDir }),
+    });
+    assert.equal(copySelf.status, 400);
+    console.log('✓ copying a folder onto itself is refused');
 
     const delRes = await fetch('http://localhost:4180/api/cards/delete', {
       method: 'POST',

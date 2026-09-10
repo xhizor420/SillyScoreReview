@@ -75,6 +75,7 @@
   <button id="selectDupeLosersBtn" class="secondary hidden" title="Selects every duplicate except the highest-scoring one in each group.">Select all but the best of each</button>
   <span id="selectionCount"></span>
   <button id="scoreSelectedBtn" class="hidden">Score selected</button>
+  <button id="copySelectedBtn" class="secondary hidden" title="Copies the selected cards into another folder. Originals stay exactly where they are.">Copy selected to…</button>
   <button id="deleteSelectedBtn" class="danger hidden">Delete selected</button>
   <button id="clearSelectionBtn" class="secondary hidden">Clear</button>
 </div>
@@ -95,10 +96,10 @@
 
 <aside id="folderPanel" class="trash-panel hidden">
   <div class="trash-header">
-    <h2>Choose characters folder</h2>
+    <h2 id="folderPanelTitle">Choose characters folder</h2>
     <button id="closeFolderBtn" class="secondary">Close</button>
   </div>
-  <p class="folder-hint">Browse to the folder holding your SillyTavern card PNGs/JSON (e.g. <code>SillyTavern/data/default-user/characters</code>), or paste the full path directly.</p>
+  <p id="folderPanelHint" class="folder-hint">Browse to the folder holding your SillyTavern card PNGs/JSON (e.g. <code>SillyTavern/data/default-user/characters</code>), or paste the full path directly.</p>
   <div class="folder-path-row">
     <input id="folderPathInput" type="text" placeholder="/path/to/characters" />
     <button id="folderGoBtn">Go</button>
@@ -111,6 +112,7 @@
   <ul id="folderList"></ul>
   <div class="folder-actions">
     <button id="useFolderBtn">Use this folder</button>
+    <button id="copyHereBtn" class="hidden">Copy here</button>
   </div>
 </aside>
 

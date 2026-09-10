@@ -43,6 +43,7 @@ const els = {
   selectFocusLosersBtn: document.getElementById('selectFocusLosersBtn'),
   scoreSelectedBtn: document.getElementById('scoreSelectedBtn'),
   deleteSelectedBtn: document.getElementById('deleteSelectedBtn'),
+  copySelectedBtn: document.getElementById('copySelectedBtn'),
   clearSelectionBtn: document.getElementById('clearSelectionBtn'),
   trashPanel: document.getElementById('trashPanel'),
   trashList: document.getElementById('trashList'),
@@ -61,6 +62,9 @@ const els = {
   folderInfo: document.getElementById('folderInfo'),
   folderList: document.getElementById('folderList'),
   useFolderBtn: document.getElementById('useFolderBtn'),
+  copyHereBtn: document.getElementById('copyHereBtn'),
+  folderPanelTitle: document.getElementById('folderPanelTitle'),
+  folderPanelHint: document.getElementById('folderPanelHint'),
   settingsBtn: document.getElementById('settingsBtn'),
   settingsPanel: document.getElementById('settingsPanel'),
   closeSettingsBtn: document.getElementById('closeSettingsBtn'),
@@ -471,10 +475,11 @@ function renderSelectionBar() {
   renderFocusBar();
 
   els.selectionCount.textContent = n ? `${n} selected` : '';
-  for (const btn of [els.scoreSelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]) {
+  for (const btn of [els.scoreSelectedBtn, els.copySelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]) {
     btn.classList.toggle('hidden', n === 0);
   }
   els.deleteSelectedBtn.textContent = n ? `Delete selected (${n})` : 'Delete selected';
+  els.copySelectedBtn.textContent = n ? `Copy selected (${n}) to…` : 'Copy selected to…';
 }
 
 async function openCard(id) {
@@ -840,9 +845,29 @@ async function browseFolder(targetPath) {
   }
 }
 
-els.folderBtn.addEventListener('click', async () => {
+// The folder panel does double duty: picking the library to review, and picking
+// a destination to copy cards into. Same browser, different verb.
+let folderPurpose = 'switch';
+
+function setFolderPurpose(purpose) {
+  folderPurpose = purpose;
+  const copying = purpose === 'copy';
+  els.folderPanelTitle.textContent = copying ? 'Copy cards to…' : 'Choose characters folder';
+  els.folderPanelHint.innerHTML = copying
+    ? 'Browse to the folder you want the selected cards copied into, or type a full path — a folder that does not exist yet will be created. The originals stay exactly where they are.'
+    : 'Browse to the folder holding your SillyTavern card PNGs/JSON (e.g. <code>SillyTavern/data/default-user/characters</code>), or paste the full path directly.';
+  els.useFolderBtn.classList.toggle('hidden', copying);
+  els.copyHereBtn.classList.toggle('hidden', !copying);
+}
+
+async function openFolderPanel(purpose, startAt) {
+  setFolderPurpose(purpose);
   els.folderPanel.classList.remove('hidden');
-  await browseFolder(els.dirLabel.textContent || undefined);
+  await browseFolder(startAt);
+}
+
+els.folderBtn.addEventListener('click', async () => {
+  await openFolderPanel('switch', els.dirLabel.textContent || undefined);
 });
 els.closeFolderBtn.addEventListener('click', () => els.folderPanel.classList.add('hidden'));
 els.folderGoBtn.addEventListener('click', () => browseFolder(els.folderPathInput.value.trim()));
@@ -871,6 +896,52 @@ els.useFolderBtn.addEventListener('click', async () => {
     }
   } catch (err) {
     alert(`Could not switch folder: ${err.message}`);
+  }
+});
+
+els.copySelectedBtn.addEventListener('click', async () => {
+  if (state.selected.size === 0) return;
+  // Start from the parent of the current library — the destination is almost
+  // always a sibling folder ("keepers", "to fix"), not somewhere far away.
+  const start = currentBrowse?.path || els.dirLabel.textContent || undefined;
+  await openFolderPanel('copy', start);
+});
+
+els.copyHereBtn.addEventListener('click', async () => {
+  const ids = [...state.selected];
+  if (ids.length === 0) {
+    alert('Nothing is selected to copy.');
+    return;
+  }
+  // A typed path wins over the browsed one, so a not-yet-existing folder can be
+  // named and created in one step.
+  const destination = els.folderPathInput.value.trim() || currentBrowse?.path || '';
+  if (!destination) return;
+  if (!confirm(`Copy ${ids.length} card${ids.length === 1 ? '' : 's'} to:\n\n${destination}\n\nThe originals stay where they are.`)) return;
+
+  els.copyHereBtn.disabled = true;
+  const previousLabel = els.copyHereBtn.textContent;
+  els.copyHereBtn.textContent = 'Copying…';
+  try {
+    const res = await api('/api/cards/copy', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids, destination }),
+    });
+    els.folderPanel.classList.add('hidden');
+    const parts = [`Copied ${res.copied.length} card${res.copied.length === 1 ? '' : 's'} to ${res.destination}.`];
+    if (res.skipped.length) parts.push(`${res.skipped.length} were already there.`);
+    if (res.errors.length) {
+      parts.push(`${res.errors.length} failed:`);
+      parts.push(res.errors.slice(0, 5).map((e) => `  • ${e.file}: ${e.error}`).join('\n'));
+    }
+    parts.push('\nScores were copied across too, so opening that folder later will show them without a rescan.');
+    alert(parts.join('\n'));
+  } catch (err) {
+    alert(`Could not copy: ${err.message}`);
+  } finally {
+    els.copyHereBtn.disabled = false;
+    els.copyHereBtn.textContent = previousLabel;
   }
 });
 
@@ -998,6 +1069,5 @@ loadCards().catch(async (err) => {
   // Most likely first run: no charactersDir picked yet. Guide straight to the folder picker.
   els.emptyState.textContent = `Couldn't read the characters folder yet (${err.message}). Use "Change folder" below to pick it.`;
   els.emptyState.classList.remove('hidden');
-  els.folderPanel.classList.remove('hidden');
-  await browseFolder();
+  await openFolderPanel('switch');
 });
