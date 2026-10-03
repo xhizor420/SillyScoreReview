@@ -268,6 +268,18 @@ function createMockProvider() {
       // An improve request wants rewritten card text back, not scores. Return a
       // deterministic *tightened* edit — shorter than the original, macros kept
       // — so the offline path exercises the real review/save flow.
+      // Fast triage asks for bare numbers; answer in that shape so the offline
+      // path exercises the same parser a real fast scan does.
+      if (/Output nothing else — no strengths/.test(system || '')) {
+        const fields = {};
+        for (const m of user.matchAll(/### (\w+)/g)) fields[m[1]] = 6;
+        const scores = Object.values(fields);
+        return JSON.stringify({
+          fields,
+          overall_score: scores.length ? Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10 : 5,
+        });
+      }
+
       if (/senior editor for SillyTavern character cards/.test(system || '')) {
         const originals = parseImprovePromptFields(user);
         const fields = {};

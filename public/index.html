@@ -30,6 +30,7 @@
     <option value="below4">Score below 4</option>
     <option value="below6">Score below 6</option>
     <option value="scored">Scored only</option>
+    <option value="fast-scored">Fast-scored (no critique yet)</option>
     <option value="duplicates">Possible duplicates</option>
   </select>
   <button id="scanUnscoredBtn" title="Scores every card with no score yet, including any that failed last time — no need to rescore everything.">Scan unscored</button>
@@ -145,6 +146,17 @@
       <button id="refreshModelsBtn" class="secondary">Refresh list</button>
     </div>
     <input id="settingsModelCustom" type="text" placeholder="or type the exact model name" />
+  </div>
+
+  <div class="settings-field">
+    <label for="settingsDetail">Scoring detail</label>
+    <select id="settingsDetail">
+      <option value="full">Full critique — score + strengths, weaknesses and suggestions per field</option>
+      <option value="fast">Fast — scores only (several times quicker)</option>
+    </select>
+    <p class="folder-hint">Scanning time is almost entirely the model writing its answer, so asking for the
+    numbers alone is far quicker per card. Good for a first pass over thousands of cards: cull by score, then
+    open any card you want to keep and press <b>Rescore with full critique</b> for the written feedback.</p>
   </div>
 
   <div class="settings-field">

@@ -24,7 +24,13 @@ const DEFAULT_CONFIG = {
   model: undefined,
   apiKey: undefined,
   baseURL: undefined,
-  concurrency: 8,
+  // NanoGPT documents 10 concurrent requests; use the ceiling it allows rather
+  // than leaving a quarter of the allowance unused on a multi-thousand-card run.
+  concurrency: 10,
+  // 'full' = the complete rubric (score + strengths/weaknesses/suggestions per
+  // field). 'fast' = scores only, which is a fraction of the output tokens and
+  // so a fraction of the time — see README, "Scanning thousands of cards fast".
+  scoreDetail: 'full',
   weights: DEFAULT_WEIGHTS,
   port: 4180,
   host: '0.0.0.0',
@@ -76,6 +82,8 @@ async function loadConfig(args) {
   if (args.port) config.port = Number(args.port);
   if (args.host) config.host = args.host;
   if (args['auth-token']) config.authToken = args['auth-token'];
+  if (args.fast) config.scoreDetail = 'fast';
+  if (args.full) config.scoreDetail = 'full';
 
   config.charactersDir = path.resolve(process.cwd(), config.charactersDir);
   config.cacheFile = path.resolve(process.cwd(), config.cacheFile);
@@ -174,7 +182,7 @@ async function cmdScan(args) {
 
   await runPool(work, concurrency, async ({ file, card, hash }) => {
     try {
-      const result = await scoreCard(card, provider, { weights: config.weights });
+      const result = await scoreCard(card, provider, { weights: config.weights, detail: config.scoreDetail });
       await store.set(file, {
         hash,
         name: card.name,
@@ -538,7 +546,10 @@ async function main() {
 Usage:
   node src/cli.js scan [--config config.json] [--dir <characters folder>] [--limit N] [--rescore] [--dry-run]
                         [--provider anthropic|openai|local|mock] [--model NAME] [--api-key KEY] [--base-url URL]
-                        [--concurrency N]
+                        [--concurrency N] [--fast | --full]
+        --fast scores every field but writes no critique. The model generates a
+        fraction of the text, so a big collection finishes several times sooner.
+        Rescore any card you care about with --full (or from the dashboard) later.
   node src/cli.js doctor [--config config.json]
         Tests a few real cards against your API and explains what is slow or failing.
         Run this FIRST if a scan is crawling.

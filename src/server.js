@@ -62,6 +62,7 @@ export async function startServer(config) {
       error: entry?.error ?? null,
       previousScore: entry?.previousScore ?? null,
       improvedFrom: entry?.improvedFrom ?? null,
+      brief: Boolean(entry?.result?.brief),
       isImage: /\.png$/i.test(file),
     };
   }
@@ -86,7 +87,7 @@ export async function startServer(config) {
     await writeFile(config.configPath, JSON.stringify(onDisk, null, 2));
   }
 
-  async function scoreOne(file, provider, store) {
+  async function scoreOne(file, provider, store, detail = config.scoreDetail || 'full') {
     let card;
     let hash;
     try {
@@ -98,7 +99,7 @@ export async function startServer(config) {
       // entry for a card that no longer exists, inflating the failure count
       // forever. Drop the entry instead.
       if (err.code === 'ENOENT') {
-        await store.delete(file);
+        store.stageDelete(file);
         const gone = new Error('Card was deleted during the scan');
         gone.cardDeleted = true;
         throw gone;
@@ -107,7 +108,7 @@ export async function startServer(config) {
     }
 
     try {
-      const result = await scoreCard(card, provider, { weights: config.weights });
+      const result = await scoreCard(card, provider, { weights: config.weights, detail });
       const entry = {
         hash,
         name: card.name,
@@ -115,10 +116,14 @@ export async function startServer(config) {
         scoredAt: new Date().toISOString(),
         provider: provider.name,
         model: provider.model,
+        detail,
         result,
         error: null,
       };
-      await store.set(file, entry);
+      // Not awaited: the entry is in memory immediately and the write is
+      // coalesced with the other cards finishing around it. Every path that
+      // ends a run flushes, so nothing is left unwritten.
+      store.set(file, entry);
       return entry;
     } catch (err) {
       const entry = {
@@ -205,7 +210,9 @@ export async function startServer(config) {
     try {
       const store = await getStore(config.charactersDir);
       const provider = createProvider(config);
-      const entry = await scoreOne(req.params.id, provider, store);
+      const detail = req.body?.detail === 'full' || req.body?.detail === 'fast' ? req.body.detail : undefined;
+      const entry = await scoreOne(req.params.id, provider, store, detail ?? (config.scoreDetail || 'full'));
+      await store.flush(); // a single card is an interactive action — make it durable before replying
       res.json({ id: req.params.id, entry });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -327,6 +334,9 @@ export async function startServer(config) {
 
   app.post('/api/score/batch', async (req, res) => {
     const { ids, scope = 'selected', limit, rescore = false } = req.body || {};
+    const detail = req.body?.detail === 'full' || req.body?.detail === 'fast'
+      ? req.body.detail
+      : config.scoreDetail || 'full';
     let files;
     let store;
     try {
@@ -374,6 +384,7 @@ export async function startServer(config) {
       startedAtMs: Date.now(),
       concurrency: resolveConcurrency(config).concurrency,
       model: config.model || null,
+      detail,
       inFlight: 0,
       skipped: 0,       // cards never started because the scan was stopped
       cancelRequested: false,
@@ -414,11 +425,15 @@ export async function startServer(config) {
           if (job.recent.length > 12) job.recent.pop();
         };
         try {
-          const entry = await scoreOne(file, provider, store);
+          const entry = await scoreOne(file, provider, store, detail);
           job.done++;
           // Checkpoint a long run periodically, so a scan interrupted after
           // hours leaves a snapshot behind and not just a live file.
-          if (job.done % 250 === 0) snapshotCache(store.filePath, { reason: 'scan-checkpoint' });
+          // Flush first, or the snapshot would copy a file that is up to one
+          // coalescing window behind what has actually been scored.
+          if (job.done % 250 === 0) {
+            store.flush().then(() => snapshotCache(store.filePath, { reason: 'scan-checkpoint' }));
+          }
           const outcome = { name: entry.name, overallScore: entry.result.overall_score };
           job.results.push({ file, ...outcome });
           settle(outcome);
@@ -435,6 +450,7 @@ export async function startServer(config) {
           settle({ error: err.message });
         }
       });
+      await store.flush();
       job.status = job.cancelRequested ? 'stopped' : 'done';
       job.finishedAt = new Date().toISOString();
     })();
@@ -465,6 +481,7 @@ export async function startServer(config) {
       inFlight: job.inFlight,
       concurrency: job.concurrency,
       model: job.model,
+      detail: job.detail,
       elapsedMs,
       perHour,
       medianLatencyMs: medianMs,
@@ -503,12 +520,14 @@ export async function startServer(config) {
           // no collision, use original name
         }
         await rename(src, dest);
-        await store.delete(file);
+        store.stageDelete(file);
         moved.push({ file, trashedAs: destName });
       } catch (err) {
         errors.push({ file, error: err.message });
       }
     }
+    // One write for the whole batch, not one per card.
+    await store.flush();
     res.json({ moved, errors });
   });
 
@@ -702,6 +721,7 @@ export async function startServer(config) {
       effectiveConcurrency: resolveConcurrency(config).concurrency,
       requestsPerMinute: config.requestsPerMinute ?? preset?.requestsPerMinute ?? 0,
       timeoutMs: config.timeoutMs ?? 120000,
+      scoreDetail: config.scoreDetail || 'full',
       charactersDir: config.charactersDir,
       authRequired: Boolean(config.authToken),
       presets: PROVIDER_PRESETS,
@@ -709,7 +729,10 @@ export async function startServer(config) {
   });
 
   app.post('/api/settings', async (req, res) => {
-    const { provider, model, baseURL, apiKey, concurrency, requestsPerMinute, timeoutMs } = req.body || {};
+    const { provider, model, baseURL, apiKey, concurrency, requestsPerMinute, timeoutMs, scoreDetail } = req.body || {};
+    if (scoreDetail !== undefined && scoreDetail !== 'full' && scoreDetail !== 'fast') {
+      return res.status(400).json({ error: `Unknown scoring detail "${scoreDetail}"` });
+    }
     if (provider !== undefined) {
       if (!PROVIDER_PRESETS[provider]) return res.status(400).json({ error: `Unknown provider "${provider}"` });
       config.provider = provider;
@@ -722,6 +745,7 @@ export async function startServer(config) {
       config.requestsPerMinute = Math.max(0, Number(requestsPerMinute));
     }
     if (timeoutMs) config.timeoutMs = Math.max(5000, Number(timeoutMs));
+    if (scoreDetail !== undefined) config.scoreDetail = scoreDetail;
 
     let persisted = true;
     let persistError = null;
@@ -734,6 +758,7 @@ export async function startServer(config) {
       if (concurrency) patch.concurrency = config.concurrency;
       if (requestsPerMinute !== undefined && requestsPerMinute !== '') patch.requestsPerMinute = config.requestsPerMinute;
       if (timeoutMs) patch.timeoutMs = config.timeoutMs;
+      if (scoreDetail !== undefined) patch.scoreDetail = scoreDetail;
       await persistConfigPatch(patch);
     } catch (err) {
       persisted = false;

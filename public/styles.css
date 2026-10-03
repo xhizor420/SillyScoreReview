@@ -193,6 +193,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .dupe-link { cursor: pointer; font-family: inherit; }
 .dupe-link:hover { filter: brightness(1.35); text-decoration: underline; }
 
+.grid-more {
+  display: block; width: calc(100% - 40px); margin: 0 20px 20px;
+  padding: 12px; font-size: 13px;
+}
+
 .focus-bar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin: 12px 20px 0; padding: 9px 12px;

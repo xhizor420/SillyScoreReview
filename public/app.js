@@ -10,6 +10,7 @@ const state = {
   focusKey: null,         // when set, show only that name group
   lastToggledIndex: null, // anchor for shift-click range selection
   selectMode: false,      // touch: tap a tile to select rather than open it
+  renderLimit: 0,         // how many of state.shown are actually built as DOM
 };
 
 const els = {
@@ -78,6 +79,7 @@ const els = {
   refreshModelsBtn: document.getElementById('refreshModelsBtn'),
   settingsModelCustom: document.getElementById('settingsModelCustom'),
   settingsConcurrency: document.getElementById('settingsConcurrency'),
+  settingsDetail: document.getElementById('settingsDetail'),
   settingsRpm: document.getElementById('settingsRpm'),
   settingsTimeout: document.getElementById('settingsTimeout'),
   concurrencyHint: document.getElementById('concurrencyHint'),
@@ -290,6 +292,7 @@ function passesFilter(card) {
   if (f === 'below4') return card.overallScore != null && card.overallScore < 4;
   if (f === 'below6') return card.overallScore != null && card.overallScore < 6;
   if (f === 'scored') return card.overallScore != null;
+  if (f === 'fast-scored') return card.brief === true;
   return true;
 }
 
@@ -316,7 +319,8 @@ function sortCards(cards) {
   return sorted;
 }
 
-function renderGrid() {
+function renderGrid({ keepWindow = false } = {}) {
+  if (!keepWindow) state.renderLimit = PAGE_SIZE;
   const query = els.search.value.trim().toLowerCase();
 
   let cards = state.cards.filter((c) => c.name.toLowerCase().includes(query) && passesFilter(c));
@@ -338,7 +342,22 @@ function renderGrid() {
   els.emptyState.classList.toggle('hidden', cards.length > 0);
   renderSelectionBar();
 
-  cards.forEach((card, index) => {
+  // Build only as much of the grid as can be on screen, and extend it as you
+  // scroll. At 3,765 cards the full grid is ~34,000 DOM nodes and half a second
+  // to build — paid again on every keystroke, filter change and selection.
+  // Everything else (filtering, "Select all shown", the duplicate groups) still
+  // works on the whole list; only the DOM is windowed.
+  state.renderLimit = Math.min(cards.length, Math.max(PAGE_SIZE, state.renderLimit || PAGE_SIZE));
+  appendTiles(cards.slice(0, state.renderLimit), 0);
+}
+
+const PAGE_SIZE = 240;
+
+/** Renders one page of tiles into the grid. `offset` keeps shift-click ranges honest. */
+function appendTiles(cards, offset) {
+  const frag = document.createDocumentFragment();
+  cards.forEach((card, i) => {
+    const index = offset + i;
     const tile = document.createElement('div');
     tile.className = 'card-tile';
 
@@ -448,14 +467,51 @@ function renderGrid() {
         if (state.selected.has(card.id)) state.selected.delete(card.id);
         else state.selected.add(card.id);
         state.lastToggledIndex = index;
-        renderGrid();
+        renderGrid({ keepWindow: true });
         return;
       }
       openCard(card.id);
     });
-    els.grid.appendChild(tile);
+    frag.appendChild(tile);
   });
+  els.grid.appendChild(frag);
+  updateMoreRow();
 }
+
+/**
+ * Shows how much of the list is on screen and extends it — on scroll, or by
+ * pressing the row. Without this, "3,765 cards shown" but only 240 tiles built
+ * would be a lie.
+ */
+function updateMoreRow() {
+  let row = document.getElementById('gridMore');
+  const total = state.shown.length;
+  const drawn = els.grid.querySelectorAll('.card-tile').length;
+  if (drawn >= total) {
+    row?.remove();
+    return;
+  }
+  if (!row) {
+    row = document.createElement('button');
+    row.id = 'gridMore';
+    row.className = 'grid-more secondary';
+    row.addEventListener('click', showMore);
+    els.grid.after(row);
+  }
+  row.textContent = `Showing ${drawn} of ${total} — show more`;
+}
+
+function showMore() {
+  const drawn = els.grid.querySelectorAll('.card-tile').length;
+  if (drawn >= state.shown.length) return;
+  state.renderLimit = Math.min(state.shown.length, drawn + PAGE_SIZE);
+  appendTiles(state.shown.slice(drawn, state.renderLimit), drawn);
+}
+
+// Extend the grid before the bottom is reached, so scrolling feels continuous.
+window.addEventListener('scroll', () => {
+  if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 600) showMore();
+}, { passive: true });
 
 function focusGroup(key) {
   state.focusKey = key;
@@ -509,8 +565,9 @@ async function openCard(id) {
   const result = entry?.result;
 
   let html = `<h2>${escapeHtml(data.name)}</h2>`;
+  const briefOnly = Boolean(result?.brief);
   html += `<div class="modal-actions">
-    <button data-action="score">${result ? 'Rescore' : 'Score this card'}</button>
+    <button data-action="score">${briefOnly ? 'Rescore with full critique' : result ? 'Rescore' : 'Score this card'}</button>
     <button data-action="improve" title="${result && !result.partial
       ? 'Rewrites the weak fields using this card\'s own critique. You review and edit the result before anything is saved.'
       : 'Score this card first for a critique-guided rewrite — or improve it now on the text alone.'}">Improve with AI</button>
@@ -537,16 +594,19 @@ async function openCard(id) {
       <div class="overall-score">${result.overall_score} / 10</div>
       ${result.partial
         ? '<div class="partial-note">Score only. This score was recovered from a previous session, so the written critique is not available — click <b>Rescore</b> above to generate it. The card\'s own text is shown below so you can still judge it yourself.</div>'
-        : `<div>${escapeHtml(result.summary || '')}</div>`}
+        : result.brief
+          ? '<div class="partial-note">Scored in <b>fast mode</b>: every field got a score, but no written critique was generated — that is what makes a fast pass several times quicker. Click <b>Rescore with full critique</b> above for the strengths, weaknesses and suggestions.</div>'
+          : `<div>${escapeHtml(result.summary || '')}</div>`}
       ${result.top_priority_improvements?.length ? `<ol class="priority-list">${result.top_priority_improvements.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ol>` : ''}
     </div>`;
 
     for (const [field, f] of Object.entries(result.fields)) {
+      const hasCritique = f.strengths || f.weaknesses || f.suggestions;
       html += `<div class="field-block">
         <div class="field-title"><span>${escapeHtml(field.replace(/_/g, ' '))}</span><span class="field-score">${f.score ?? '–'}/10</span></div>
-        <div class="field-sub"><b>Strengths:</b> ${escapeHtml(f.strengths || '—')}</div>
+        ${hasCritique ? `<div class="field-sub"><b>Strengths:</b> ${escapeHtml(f.strengths || '—')}</div>
         <div class="field-sub"><b>Weaknesses:</b> ${escapeHtml(f.weaknesses || '—')}</div>
-        <div class="field-sub"><b>Suggestions:</b> ${escapeHtml(f.suggestions || '—')}</div>
+        <div class="field-sub"><b>Suggestions:</b> ${escapeHtml(f.suggestions || '—')}</div>` : ''}
       </div>`;
     }
   } else if (!entry?.error) {
@@ -577,7 +637,13 @@ async function openCard(id) {
     e.target.disabled = true;
     e.target.textContent = 'Scoring…';
     try {
-      await api(`/api/cards/${encodeURIComponent(id)}/score`, { method: 'POST' });
+      await api(`/api/cards/${encodeURIComponent(id)}/score`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        // Opening a single card is the moment you want the written feedback,
+        // so this always asks for it even when scans are set to fast mode.
+        body: JSON.stringify({ detail: 'full' }),
+      });
       await loadCards();
       await openCard(id);
     } catch (err) {
@@ -634,6 +700,7 @@ function renderScanPanel(job) {
     { label: 'Median', value: fmtDuration(job.medianLatencyMs) },
     { label: 'ETA', value: job.stopping ? 'stopping' : job.status === 'running' ? fmtDuration(job.etaMs) : job.status === 'stopped' ? 'stopped' : 'done' },
     { label: 'Elapsed', value: fmtDuration(job.elapsedMs) },
+    { label: 'Mode', value: job.detail === 'fast' ? 'fast' : 'full' },
   ];
   els.scanStats.innerHTML = stats
     .map((s) => `<div class="scan-stat ${s.cls || ''}"><b>${escapeHtml(String(s.value))}</b><span>${escapeHtml(s.label)}</span></div>`)
@@ -761,7 +828,13 @@ async function loadTrash() {
   }
 }
 
-els.search.addEventListener('input', renderGrid);
+let searchTimer = null;
+els.search.addEventListener('input', () => {
+  // Re-rendering on every keystroke made typing in a 3,000-card collection lag
+  // by about a second per character. One render after you stop is enough.
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => renderGrid(), 120);
+});
 els.sortBy.addEventListener('change', renderGrid);
 els.filterBy.addEventListener('change', () => {
   state.focusKey = null;
@@ -1050,6 +1123,7 @@ async function openSettings() {
     els.settingsConcurrency.value = data.concurrency;
     els.settingsRpm.value = data.requestsPerMinute ?? 0;
     els.settingsTimeout.value = Math.round((data.timeoutMs ?? 120000) / 1000);
+    els.settingsDetail.value = data.scoreDetail || 'full';
     els.settingsModelCustom.value = data.model || '';
     els.apiKeyStatus.textContent = data.apiKeySet ? '(a key is saved — leave blank to keep it)' : '(none saved yet)';
     els.settingsApiKey.value = '';
@@ -1097,6 +1171,7 @@ function updateThroughputHint() {
   const rpm = Number(els.settingsRpm.value) || 0;
   const conc = Number(els.settingsConcurrency.value) || 1;
   const total = state.cards.length;
+  const fast = els.settingsDetail.value === 'fast';
   if (!rpm) {
     els.throughputHint.textContent = 'No pacing: requests go as fast as concurrency allows. Only safe for a local model on your own hardware.';
     return;
@@ -1106,11 +1181,15 @@ function updateThroughputHint() {
   const eta = hours == null ? '' : hours < 1 ? ` — about ${Math.round(hours * 60)} min for all ${total} cards` : ` — about ${hours.toFixed(1)} h for all ${total} cards`;
   els.throughputHint.textContent =
     `${rpm}/min = up to ${perHour} cards/hour${eta}. ` +
-    `Reaching that also needs the model to answer in under ~${(conc / rpm * 60).toFixed(0)}s; slower than that and concurrency (${conc}) becomes the limit instead.`;
+    `Reaching that also needs the model to answer in under ~${(conc / rpm * 60).toFixed(0)}s; slower than that and concurrency (${conc}) becomes the limit instead.` +
+    (fast
+      ? ' Fast mode makes each answer short, which is what gets you near that ceiling.'
+      : ' Full critique means a long answer per card — switch Scoring detail to Fast for a first pass.');
 }
 
 els.settingsRpm.addEventListener('input', updateThroughputHint);
 els.settingsConcurrency.addEventListener('input', updateThroughputHint);
+els.settingsDetail.addEventListener('change', updateThroughputHint);
 
 els.settingsModelSelect.addEventListener('change', () => {
   if (els.settingsModelSelect.value) els.settingsModelCustom.value = els.settingsModelSelect.value;
@@ -1126,6 +1205,7 @@ els.saveSettingsBtn.addEventListener('click', async () => {
     concurrency: Number(els.settingsConcurrency.value) || undefined,
     requestsPerMinute: els.settingsRpm.value === '' ? undefined : Number(els.settingsRpm.value),
     timeoutMs: els.settingsTimeout.value ? Number(els.settingsTimeout.value) * 1000 : undefined,
+    scoreDetail: els.settingsDetail.value,
   };
   if (els.settingsApiKey.value.trim()) body.apiKey = els.settingsApiKey.value.trim();
 

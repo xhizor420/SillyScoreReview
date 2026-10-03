@@ -427,6 +427,8 @@ async function main() {
   await testImproverGuards();
   await testBackups();
   await testStopScan();
+  await testFastScoring();
+  await testCoalescedWrites();
 
   console.log('\nAll self-tests passed.');
 }
@@ -977,6 +979,161 @@ async function testStopScan() {
     slowApi.close();
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Fast triage mode. Scanning time is almost entirely the model writing its
+ * answer, so the only real lever on speed is asking it to write less — this
+ * checks that fast mode actually does, and that what comes back is still a
+ * usable score rather than a degraded one.
+ */
+async function testFastScoring() {
+  const { scoreCard, buildScoringPrompts, FAST_SYSTEM_PROMPT, FULL_SYSTEM_PROMPT } = await import('../src/scorer.js');
+
+  const seen = [];
+  const fakeApi = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const parsed = JSON.parse(body);
+      const system = parsed.messages.find((m) => m.role === 'system').content;
+      const fast = system === FAST_SYSTEM_PROMPT;
+      seen.push({ fast, maxTokens: parsed.max_tokens, systemChars: system.length });
+      const content = fast
+        ? JSON.stringify({ fields: { description: 8, first_mes: 6 }, overall_score: 7.4 })
+        : JSON.stringify({
+            fields: {
+              description: { score: 8, strengths: 'a'.repeat(70), weaknesses: 'b'.repeat(70), suggestions: 'c'.repeat(70) },
+              first_mes: { score: 6, strengths: 'a'.repeat(70), weaknesses: 'b'.repeat(70), suggestions: 'c'.repeat(70) },
+            },
+            overall_score: 7.4,
+            top_priority_improvements: ['x'.repeat(40), 'y'.repeat(40), 'z'.repeat(40)],
+            summary: 's'.repeat(180),
+          });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }));
+    });
+  });
+  await new Promise((r) => fakeApi.listen(0, r));
+  const port = fakeApi.address().port;
+
+  const provider = createProvider({ provider: 'openai', baseURL: `http://localhost:${port}`, apiKey: 'test', model: 'test-model' });
+  const card = { name: 'Fast Test', fields: { description: 'A description worth scoring.', first_mes: 'Hello {{user}}.' } };
+
+  const full = await scoreCard(card, provider, { detail: 'full' });
+  const fast = await scoreCard(card, provider, { detail: 'fast' });
+  fakeApi.close();
+
+  assert.equal(fast.fields.description.score, 8, 'fast mode must still produce a per-field score');
+  assert.equal(fast.fields.first_mes.score, 6);
+  assert.equal(fast.overall_score, 7.4);
+  assert.equal(fast.brief, true, 'a fast result must be marked so the UI can offer a full rescore');
+  assert.equal(fast.fields.description.strengths, '', 'fast mode returns no critique text');
+  assert.equal(full.brief, undefined, 'a full result is not marked brief');
+  assert.ok(full.fields.description.strengths.length > 0);
+  console.log('✓ fast mode returns real per-field scores and an overall, with no critique text');
+
+  // the actual point: far less for the model to write
+  const fullChars = JSON.stringify(full).length;
+  const fastChars = JSON.stringify({ fields: { description: 8, first_mes: 6 }, overall_score: 7.4 }).length;
+  assert.ok(fullChars > fastChars * 5, `expected the full answer to dwarf the fast one (${fullChars} vs ${fastChars})`);
+  assert.ok(seen[1].maxTokens < seen[0].maxTokens || seen[1].maxTokens <= 400,
+    `fast mode should ask for a small output budget (got ${seen[1].maxTokens})`);
+  console.log(`✓ fast mode asks the model for ~${(fullChars / fastChars).toFixed(0)}x less output (budget ${seen[1].maxTokens} vs ${seen[0].maxTokens ?? 'default'} tokens)`);
+
+  const fastPrompts = buildScoringPrompts(card, undefined, { detail: 'fast' });
+  const fullPrompts = buildScoringPrompts(card, undefined, { detail: 'full' });
+  assert.equal(fastPrompts.system, FAST_SYSTEM_PROMPT);
+  assert.equal(fullPrompts.system, FULL_SYSTEM_PROMPT);
+  assert.match(fastPrompts.user, /### description/, 'scored fields are still presented the same way');
+
+  // A zero-weight field contributes nothing to the overall score, so a
+  // scores-only pass should not pay to send it.
+  const withGreetings = {
+    name: 'Greeting Heavy',
+    fields: { description: 'Short description.', alternate_greetings: 'A long alternate greeting. '.repeat(60) },
+  };
+  const fastG = buildScoringPrompts(withGreetings, undefined, { detail: 'fast' });
+  const fullG = buildScoringPrompts(withGreetings, undefined, { detail: 'full' });
+  assert.ok(fullG.user.includes('alternate_greetings'), 'full mode still critiques zero-weight fields');
+  assert.ok(!fastG.user.includes('alternate_greetings'), 'fast mode skips fields that cannot affect the score');
+  assert.ok(fastG.user.length < fullG.user.length / 3,
+    `fast prompt should be far smaller (${fastG.user.length} vs ${fullG.user.length} chars)`);
+  console.log(`✓ fast mode drops zero-weight fields from the prompt too (${fullG.user.length} → ${fastG.user.length} chars on a greeting-heavy card)`);
+
+  // ...but a card whose only text lives in those fields must still get a score.
+  const onlyGreetings = { name: 'Greetings Only', fields: { alternate_greetings: 'The only text this card has.' } };
+  const providerForFallback = {
+    name: 'stub', model: 'stub',
+    async chat({ user }) {
+      assert.ok(user.includes('### alternate_greetings'), 'the fallback must send the card it does have');
+      return JSON.stringify({ fields: { alternate_greetings: 5 }, overall_score: 5 });
+    },
+  };
+  const fallback = await scoreCard(onlyGreetings, providerForFallback, { detail: 'fast' });
+  assert.equal(fallback.overall_score, 5);
+  console.log('✓ a card whose only text is in a zero-weight field is still scored, not skipped');
+  assert.match(FAST_SYSTEM_PROMPT, /never length/, 'fast mode must keep the no-length-bias rule');
+  assert.match(FAST_SYSTEM_PROMPT, /Do not be generous/);
+  console.log('✓ fast mode keeps the same card prompt and the same "never judge by length" standard');
+}
+
+/**
+ * Cache writes. A full rewrite per card is O(n) per card: at 3,765 cards that
+ * is a ~9MB JSON.stringify every time one finishes. Writes are coalesced above
+ * a threshold — but a flush must still put everything on disk.
+ */
+async function testCoalescedWrites() {
+  const { Store } = await import('../src/store.js');
+  const dir = await mkdtemp(path.join(tmpdir(), 'sillyscore-writes-'));
+  const file = path.join(dir, 'cache.json');
+
+  let writes = 0;
+  const makeStore = (opts) => {
+    const store = new Store(file, '/cards', opts);
+    const realSave = store._save.bind(store);
+    store._save = async () => { writes++; return realSave(); };
+    return store;
+  };
+
+  // Small cache: every set is written immediately, because it costs nothing.
+  const small = makeStore({ coalesceMs: 50, coalesceAbove: 5 });
+  for (let i = 0; i < 4; i++) await small.set(`small-${i}.png`, { result: { overall_score: 5 } });
+  assert.equal(writes, 4, 'a small cache should still write after every card');
+  console.log('✓ a small cache is written after every card (durability where it is free)');
+
+  // Big cache: a burst of finishing cards collapses into one write.
+  writes = 0;
+  const big = makeStore({ coalesceMs: 60, coalesceAbove: 5 });
+  await big.load();
+  for (let i = 0; i < 40; i++) big.set(`big-${i}.png`, { result: { overall_score: 7 } });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.ok(writes <= 3, `expected a burst of 40 cards to collapse into a couple of writes, got ${writes}`);
+  console.log(`✓ 40 cards finishing together cost ${writes} file write(s) instead of 40`);
+
+  // and nothing is lost: everything staged is on disk after a flush
+  for (let i = 0; i < 10; i++) big.set(`late-${i}.png`, { result: { overall_score: 9 } });
+  await big.flush();
+  const onDisk = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(Object.keys(onDisk.cards).length, 54, 'every staged card must be on disk after a flush');
+  assert.equal(onDisk.cards['late-9.png'].result.overall_score, 9);
+  console.log('✓ flush() puts every pending card on disk — a run always ends on one');
+
+  // Bulk delete must not pay a coalescing window per card. Awaiting delete()
+  // in a loop once turned "cull 500 bad cards" into a ten-minute wait.
+  const bulk = new Store(path.join(dir, 'bulk.json'), '/cards', { coalesceMs: 1200, coalesceAbove: 100 });
+  for (let i = 0; i < 1000; i++) bulk.stage(`c${i}.png`, { result: { overall_score: 5 } });
+  await bulk.flush();
+  const started = Date.now();
+  for (let i = 0; i < 500; i++) bulk.stageDelete(`c${i}.png`);
+  await bulk.flush();
+  const tookMs = Date.now() - started;
+  const left = Object.keys(JSON.parse(await readFile(path.join(dir, 'bulk.json'), 'utf8')).cards).length;
+  assert.equal(left, 500, 'every deleted entry must be gone from disk');
+  assert.ok(tookMs < 2000, `deleting 500 cards should be one write, not 500 (took ${tookMs}ms)`);
+  console.log(`✓ deleting 500 cards costs one write (${tookMs}ms), not one coalescing window each`);
+
+  await rm(dir, { recursive: true, force: true });
 }
 
 main().catch((err) => {

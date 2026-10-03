@@ -177,6 +177,29 @@ node src/cli.js restore-backup <name>       # put one back (close the dashboard 
 Restoring saves the current file as a snapshot too, so a restore is itself undoable. The
 Settings panel lists the snapshots it has for the folder you're looking at.
 
+## A dashboard that stays quick at 3,765 cards
+
+The grid only builds the tiles you can actually see and extends as you scroll, so the
+page doesn't pay for thousands of cards it isn't showing. Measured on a 3,765-card
+collection:
+
+| | before | now |
+|---|---|---|
+| first cards on screen | 1,613ms | 323ms |
+| re-render (every keystroke, filter, selection) | 471ms | 18ms |
+| typing "Raven" in the search box | ~1,140ms | ~60ms |
+| DOM nodes held | 34,021 | 2,297 |
+
+Filtering, searching, duplicate grouping and **Select all shown** still work across the
+whole collection — only the drawing is windowed, so "Select all shown" on 3,765 cards
+selects 3,765 cards, not the 240 on screen.
+
+Score writes are batched too. Saving after every single card meant rewriting the whole
+9MB score file each time — about 2.5 minutes of blocked work across a full run, which
+also made the dashboard stutter while scanning. Results now coalesce into one write per
+second or so, and every path that ends a run (finishing, stopping, scoring one card from
+the modal) flushes to disk first.
+
 ## Using it from your phone
 
 The dashboard works from a phone over Tailscale — browse, score, compare and delete, all
@@ -214,6 +237,54 @@ node src/cli.js merge-caches   # combines them into one, keeping the best entry 
 card, newer beats older, the existing file is backed up first, and entries for cards no
 longer in the folder are pruned. Add `--dry-run` to preview, `--no-prune` to keep
 entries for deleted cards.
+
+## Scanning thousands of cards fast
+
+Scan time is almost entirely the model writing its answer — the pipeline around it
+costs about **6ms per card**, so nothing local is worth optimising. The levers that
+matter are how much the model has to write, and how many cards are in flight.
+
+**Scoring detail** (Settings, or `--fast` on the CLI):
+
+| | |
+|---|---|
+| **Full critique** | The complete rubric: a score plus strengths, weaknesses and suggestions for every field, three priority improvements and a summary. ~15x more output per card. |
+| **Fast** | Every field still gets a real score, judged by the same standard — the model just doesn't write the prose. |
+
+The recommended way to work through a big collection is **fast first**: score
+everything, delete what's bad, group the duplicates and keep the best — none of which
+needs the written critique. Then open the cards you're keeping and press **Rescore with
+full critique** for the feedback that actually drives an improvement. Opening a single
+card always asks for the full critique, whatever the scan setting is, and the
+**Fast-scored (no critique yet)** filter finds every card still waiting for one.
+
+Fast mode does *not* lower the standard: it keeps the same "never judge by length, call
+out padding" instruction and is explicitly told not to be generous, because the numbers
+decide what gets deleted.
+
+**Parallel requests** now default to 10 — the most NanoGPT documents — instead of 8.
+The dashboard clamps whatever you type to the provider's stated ceiling, so this cannot
+get you rate-limited or banned.
+
+Fast mode also stops sending fields that can't affect the score at all
+(`alternate_greetings` has weight 0 by default), which on a greeting-heavy card cuts the
+prompt dramatically as well. Full mode still critiques them.
+
+**What it's actually worth.** Measured end to end through the real server against a
+simulated API that decodes at a fixed tokens/second — because that is what an LLM's
+latency actually tracks:
+
+| | output per card | 3,765 cards |
+|---|---|---|
+| full critique, 8 parallel (the old default) | 432 tokens | 1.6 h |
+| full critique, 10 parallel | 432 tokens | 1.3 h |
+| fast mode, 10 parallel | 27 tokens | 1.0 h |
+
+The gap widens the slower your model is, because fast mode spends almost no time
+decoding. One thing to know: once answers get short, the **60 requests/minute** cap
+becomes the limit rather than the model, which puts the hard ceiling at **3,600
+cards/hour** however fast everything else gets. That is NanoGPT's published rule and the
+scanner paces itself to stay inside it.
 
 ## Scan crawling? Run `doctor` first
 
