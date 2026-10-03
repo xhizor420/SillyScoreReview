@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import assert from 'node:assert/strict';
 
 import { createServer } from 'node:http';
+import { crc32 as zlibCrc32 } from 'node:zlib';
 
 import { extractCardFromPng } from '../src/cardParser.js';
 import { createProvider } from '../src/llmClient.js';
@@ -21,13 +22,32 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 function pngChunk(type, data) {
   const length = Buffer.alloc(4);
   length.writeUInt32BE(data.length, 0);
-  return Buffer.concat([length, Buffer.from(type, 'ascii'), data, Buffer.alloc(4)]); // dummy CRC, our reader ignores it
+  const typeBuf = Buffer.from(type, 'ascii');
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(zlibCrc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([length, typeBuf, data, crc]);
 }
 
+/**
+ * A minimal but structurally real PNG: signature, IHDR, the card's chara chunk,
+ * one IDAT and IEND, with valid CRCs throughout. Fixtures have to be real PNGs
+ * now that the tool writes cards back out as well as reading them.
+ */
 function buildFakePng(cardObject) {
   const base64 = Buffer.from(JSON.stringify(cardObject), 'utf8').toString('base64');
   const textData = Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(base64, 'latin1')]);
-  return Buffer.concat([PNG_SIGNATURE, pngChunk('tEXt', textData), pngChunk('IEND', Buffer.alloc(0))]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0);   // width
+  ihdr.writeUInt32BE(1, 4);   // height
+  ihdr[8] = 8;                // bit depth
+  ihdr[9] = 6;                // colour type: RGBA
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', ihdr),
+    pngChunk('tEXt', textData),
+    pngChunk('IDAT', Buffer.from([0x78, 0x9c, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01])),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
 }
 
 async function main() {
@@ -304,6 +324,77 @@ async function main() {
     assert.equal(copySelf.status, 400);
     console.log('✓ copying a folder onto itself is refused');
 
+    // improve + save: the model rewrites, nothing is written until asked, and
+    // saving as a new card leaves the original (and its score) alone
+    const improveRes = await fetch('http://localhost:4180/api/cards/good-card.png/improve', { method: 'POST' });
+    const improve = await improveRes.json();
+    assert.equal(improveRes.status, 200, `improve failed: ${JSON.stringify(improve)}`);
+    assert.ok(Object.keys(improve.fields).length > 0, 'expected at least one rewritten field');
+    const firstField = Object.keys(improve.fields)[0];
+    assert.ok(improve.before[firstField], 'the original text must come back for side-by-side review');
+    assert.ok(improve.fields[firstField].tokensAfter <= improve.fields[firstField].tokensBefore,
+      'the mock edit should be no longer than the original');
+    assert.deepEqual((await readdir(charactersDir)).sort(), ['bloated-card.png', 'good-card.png'],
+      'asking for an improvement must not write any file');
+    console.log(`✓ improve returns a reviewable draft (${Object.keys(improve.fields).length} field(s)) and writes nothing`);
+
+    const saveRes = await fetch('http://localhost:4180/api/cards/good-card.png/save', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        fields: { [firstField]: improve.fields[firstField].text },
+        mode: 'new',
+        rescore: true,
+      }),
+    });
+    const saved = await saveRes.json();
+    assert.equal(saveRes.status, 200, `save failed: ${JSON.stringify(saved)}`);
+    assert.equal(saved.file, 'good-card (improved).png');
+    assert.ok(saved.previousScore != null, 'the original score should be carried over for a before/after');
+    assert.ok(saved.entry.result, 'rescore:true should leave the new card scored');
+    assert.equal(saved.entry.improvedFrom, 'good-card.png');
+    console.log(`✓ saving as a new card writes "${saved.file}", scores it, and records the ${saved.previousScore}/10 it came from`);
+
+    const improvedCard = await extractCardFromPng(await readFile(path.join(charactersDir, saved.file)));
+    assert.equal(improvedCard.fields[firstField], improve.fields[firstField].text);
+    const untouched = await extractCardFromPng(await readFile(path.join(charactersDir, 'good-card.png')));
+    assert.equal(untouched.fields[firstField], improve.before[firstField], 'the original card must be byte-identical in content');
+    const listWithImproved = await (await fetch('http://localhost:4180/api/cards')).json();
+    const originalRow = listWithImproved.cards.find((c) => c.id === 'good-card.png');
+    assert.ok(originalRow.overallScore != null, 'the original keeps its own score');
+    console.log('✓ the original card and its score are untouched by the improvement');
+
+    // replace mode: in place, but with a restorable copy of the old version
+    const replaceRes = await fetch('http://localhost:4180/api/cards/good-card.png/save', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fields: { description: 'A hand-edited description.' }, mode: 'replace' }),
+    });
+    const replaced = await replaceRes.json();
+    assert.equal(replaceRes.status, 200, `replace failed: ${JSON.stringify(replaced)}`);
+    assert.equal(replaced.file, 'good-card.png');
+    assert.ok(replaced.backedUpAs, 'replacing in place must keep a restorable copy');
+    const edited = await extractCardFromPng(await readFile(path.join(charactersDir, 'good-card.png')));
+    assert.equal(edited.fields.description, 'A hand-edited description.');
+    assert.equal(edited.name, 'Test Good Card', 'editing one field must not touch the name');
+    const backupCopy = await extractCardFromPng(await readFile(path.join(trashDir, replaced.backedUpAs)));
+    assert.equal(backupCopy.fields.description, goodCard.data.description, 'the pre-edit version must be recoverable');
+    const afterEdit = await (await fetch('http://localhost:4180/api/cards')).json();
+    const editedRow = afterEdit.cards.find((c) => c.id === 'good-card.png');
+    assert.equal(editedRow.overallScore, null, 'an edited card should not keep a score that describes the old text');
+    assert.ok(editedRow.previousScore != null, 'but it should remember what it used to score');
+    console.log(`✓ replacing in place edits the file, backs the old one up as "${replaced.backedUpAs}", and retires the stale score`);
+
+    const saveNothing = await fetch('http://localhost:4180/api/cards/good-card.png/save', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fields: {} }),
+    });
+    assert.equal(saveNothing.status, 400);
+    console.log('✓ a save with no edited fields is refused instead of rewriting the card for nothing');
+
+    const backupsRes = await (await fetch('http://localhost:4180/api/backups')).json();
+    assert.ok(backupsRes.backups.length >= 1, 'the dashboard should have snapshotted the cache on startup');
+    console.log(`✓ the dashboard snapshotted the score file on startup (${backupsRes.backups.length} backup(s) listed)`);
+
     const delRes = await fetch('http://localhost:4180/api/cards/delete', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -315,8 +406,11 @@ async function main() {
 
     const trashRes = await fetch('http://localhost:4180/api/trash');
     const trash = await trashRes.json();
-    assert.equal(trash.items.length, 1);
-    console.log('✓ server lists the trashed card for possible restore');
+    // The deleted card, plus the pre-edit copy kept by the replace above.
+    assert.equal(trash.items.length, 2);
+    assert.ok(trash.items.some((i) => i.file === 'bloated-card.png'));
+    assert.ok(trash.items.some((i) => i.file.includes('before-edit')));
+    console.log('✓ server lists the trashed card (and the pre-edit backup) for possible restore');
   } finally {
     server.close();
   }
@@ -329,6 +423,10 @@ async function main() {
   await testTimeoutRetryGetsLongerDeadline();
   await testCacheFollowsTheFolder();
   await testMergeCaches();
+  await testCardRoundTrip();
+  await testImproverGuards();
+  await testBackups();
+  await testStopScan();
 
   console.log('\nAll self-tests passed.');
 }
@@ -582,6 +680,303 @@ async function testJsonRepairRetryGetsMoreTokens() {
   );
   assert.equal(result.fields.description.score, 7);
   console.log(`✓ JSON-repair retry raises max_tokens (${requestedMaxTokens[0]} → ${requestedMaxTokens[1]}) instead of resending the same budget`);
+}
+
+/**
+ * Writing a card back out is the one operation in this tool that can destroy
+ * data, so the round-trip is checked hard: pixels byte-identical, every CRC
+ * valid, and everything the tool doesn't model (lorebook, creator_notes,
+ * extensions) still present afterwards.
+ */
+async function testCardRoundTrip() {
+  const { extractCardFromPng } = await import('../src/cardParser.js');
+  const { serializeCard, applyFieldsToRaw } = await import('../src/cardWriter.js');
+  const { crc32 } = await import('node:zlib');
+
+  const original = {
+    spec: 'chara_card_v2',
+    spec_version: '2.0',
+    data: {
+      name: 'Round Trip',
+      description: 'original description',
+      personality: 'unchanged personality',
+      scenario: '',
+      first_mes: 'Hello {{user}}, I am {{char}}.',
+      mes_example: '<START>\n{{user}}: hi\n{{char}}: hey',
+      alternate_greetings: ['one', 'two'],
+      character_book: { name: 'lore', entries: [{ keys: ['x'], content: 'secret lore' }] },
+      creator_notes: 'please keep me',
+      tags: ['test'],
+      extensions: { depth_prompt: { depth: 4, prompt: 'stay in character' } },
+    },
+  };
+
+  const idhr = Buffer.alloc(13);
+  idhr.writeUInt32BE(2, 0); idhr.writeUInt32BE(2, 4); idhr[8] = 8; idhr[9] = 6;
+  const realChunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+    const t = Buffer.from(type, 'ascii');
+    const c = Buffer.alloc(4); c.writeUInt32BE(crc32(Buffer.concat([t, data])), 0);
+    return Buffer.concat([len, t, data, c]);
+  };
+  const pixels = Buffer.from([9, 8, 7, 6, 5, 4, 3, 2, 1]);
+  const png = Buffer.concat([
+    PNG_SIGNATURE,
+    realChunk('IHDR', idhr),
+    realChunk('tEXt', Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(Buffer.from(JSON.stringify(original)).toString('base64'), 'latin1')])),
+    realChunk('IDAT', pixels),
+    realChunk('IEND', Buffer.alloc(0)),
+  ]);
+
+  const parsed = extractCardFromPng(png);
+  const { bytes } = serializeCard({
+    filename: 'round-trip.png',
+    originalBuffer: png,
+    raw: parsed.raw,
+    fields: { description: 'edited description', alternate_greetings: 'one\n\n---\n\ntwo\n\n---\n\nthree' },
+  });
+
+  // every chunk CRC must be valid, or SillyTavern (and every viewer) rejects it
+  let offset = 8;
+  const seen = [];
+  let idat = null;
+  while (offset + 8 <= bytes.length) {
+    const len = bytes.readUInt32BE(offset);
+    const type = bytes.toString('ascii', offset + 4, offset + 8);
+    const data = bytes.subarray(offset + 8, offset + 8 + len);
+    const stored = bytes.readUInt32BE(offset + 8 + len);
+    assert.equal(crc32(Buffer.concat([Buffer.from(type, 'ascii'), data])), stored, `${type} chunk has a bad CRC`);
+    if (type === 'IDAT') idat = data;
+    seen.push(type);
+    offset += len + 12;
+    if (type === 'IEND') break;
+  }
+  assert.deepEqual(seen, ['IHDR', 'tEXt', 'IDAT', 'IEND']);
+  assert.ok(idat.equals(pixels), 'the artwork must be copied through byte-for-byte');
+  console.log('✓ a rewritten card is a valid PNG (all CRCs check out) with the artwork untouched');
+
+  const after = extractCardFromPng(bytes);
+  assert.equal(after.fields.description, 'edited description');
+  assert.equal(after.fields.personality, 'unchanged personality', 'untouched fields must not change');
+  assert.deepEqual(after.raw.data.alternate_greetings, ['one', 'two', 'three']);
+  assert.equal(after.raw.data.creator_notes, 'please keep me');
+  assert.equal(after.raw.data.character_book.entries[0].content, 'secret lore');
+  assert.deepEqual(after.raw.data.extensions, { depth_prompt: { depth: 4, prompt: 'stay in character' } });
+  assert.deepEqual(after.tags, ['test']);
+  console.log('✓ editing a field keeps the lorebook, creator notes, tags and extensions intact');
+
+  // A file with no IHDR is already not a viewable image; editing it must still
+  // preserve the card data rather than refusing and stranding it.
+  const headerless = Buffer.concat([
+    PNG_SIGNATURE,
+    realChunk('tEXt', Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(Buffer.from(JSON.stringify(original)).toString('base64'), 'latin1')])),
+    realChunk('IEND', Buffer.alloc(0)),
+  ]);
+  const headerlessOut = serializeCard({
+    filename: 'headerless.png',
+    originalBuffer: headerless,
+    raw: extractCardFromPng(headerless).raw,
+    fields: { description: 'still editable' },
+  });
+  assert.equal(extractCardFromPng(headerlessOut.bytes).fields.description, 'still editable');
+  console.log('✓ a malformed PNG with no IHDR can still be edited instead of being rejected');
+
+  // a V1 (flat) card must stay flat
+  const v1 = applyFieldsToRaw({ name: 'Flat', description: 'old' }, { fields: { description: 'new' } });
+  assert.equal(v1.description, 'new');
+  assert.equal(v1.data, undefined, 'a V1 card must not grow a data wrapper');
+  console.log('✓ a V1 flat card is edited in place without being converted to V2');
+}
+
+/** The rewrite path must refuse to silently pad a card — that was the whole complaint. */
+async function testImproverGuards() {
+  const { buildImprovePrompts, measureFields, improveCard } = await import('../src/improver.js');
+
+  const card = {
+    name: 'Guard Test',
+    fields: {
+      description: 'x '.repeat(200).trim(), // ~200 tokens of original
+      personality: 'terse',
+      scenario: '',
+      first_mes: 'Hi {{user}}, {{char}} here, {{user}}.',
+      mes_example: '',
+      system_prompt: '',
+      post_history_instructions: '',
+      alternate_greetings: '',
+    },
+  };
+  const critique = {
+    fields: { description: { score: 3, weaknesses: 'vague', suggestions: 'be specific' } },
+    summary: 'needs work',
+    top_priority_improvements: ['sharpen the description'],
+  };
+
+  const prompts = buildImprovePrompts(card, critique);
+  assert.match(prompts.user, /Critique of this field: scored 3\/10; weaknesses: vague/);
+  assert.match(prompts.user, /your rewrite must not exceed this/);
+  assert.match(prompts.system, /DO NOT PAD/);
+  assert.ok(!prompts.user.includes('### scenario'), 'empty fields should not be offered for rewriting');
+  console.log('✓ the improve prompt carries the per-field critique and a hard token budget');
+
+  const measured = measureFields(card, {
+    description: { text: 'y '.repeat(400).trim(), why: 'doubled it' },
+    first_mes: { text: 'Hi there, I am here.', why: 'dropped the macros' },
+  });
+  assert.equal(measured.description.inflated, true, 'a doubled field must be flagged as padding');
+  assert.deepEqual(measured.first_mes.lostMacros, ['{{user}}', '{{char}}'], 'losing {{user}}/{{char}} entirely must be flagged');
+  // Dropping one of three repeated {{user}}s is ordinary editing, not a defect.
+  const deduped = measureFields(card, { first_mes: { text: 'Hi {{user}}, {{char}} here.', why: 'cut a repeat' } });
+  assert.deepEqual(deduped.first_mes.lostMacros, [], 'removing a duplicated macro must not be flagged');
+  console.log('✓ padding and macros lost entirely are flagged; removing a duplicated macro is not');
+
+  // no-op rewrites are dropped rather than shown as changes
+  const echoProvider = {
+    name: 'echo',
+    model: 'echo',
+    async chat() {
+      return JSON.stringify({ fields: { personality: { text: 'terse', why: 'unchanged' } }, headline: 'nothing' });
+    },
+  };
+  await assert.rejects(
+    improveCard(card, critique, echoProvider),
+    /no actual changes/,
+    'a rewrite identical to the original is not a change',
+  );
+  console.log('✓ a rewrite that returns the original text unchanged is reported, not saved as an edit');
+}
+
+/** Backups exist so a bad write can never be the end of hours of scoring. */
+async function testBackups() {
+  const { snapshotCache, listBackups, restoreBackup } = await import('../src/backup.js');
+  const dir = await mkdtemp(path.join(tmpdir(), 'sillyscore-backup-'));
+  const cacheFile = path.join(dir, 'data', 'cache.json');
+  await mkdir(path.dirname(cacheFile), { recursive: true });
+
+  const good = { version: 1, charactersDir: '/cards', cards: { 'a.png': { result: { overall_score: 8 } }, 'b.png': { result: { overall_score: 5 } } } };
+  await writeFile(cacheFile, JSON.stringify(good));
+
+  const snap = await snapshotCache(cacheFile, { reason: 'startup' });
+  assert.ok(snap, 'a non-empty cache should be snapshotted');
+  assert.equal(snap.cardCount, 2);
+
+  // an empty cache is not worth a snapshot, and must not push a real one out
+  await writeFile(cacheFile, JSON.stringify({ version: 1, cards: {} }));
+  assert.equal(await snapshotCache(cacheFile, { reason: 'startup' }), null);
+
+  const list = await listBackups(cacheFile);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].scoredCount, 2);
+  console.log(`✓ the score file is snapshotted before being written (${list[0].cardCount} cards), and an empty cache is not`);
+
+  // the destructive case: the live file gets clobbered, and the backup brings it back
+  await writeFile(cacheFile, JSON.stringify({ version: 1, cards: {} }));
+  const restored = await restoreBackup(list[0].file, cacheFile);
+  assert.equal(restored.cardCount, 2);
+  const back = JSON.parse(await readFile(cacheFile, 'utf8'));
+  assert.equal(Object.keys(back.cards).length, 2);
+  assert.equal(back.cards['a.png'].result.overall_score, 8);
+  console.log('✓ restoring a backup brings every score back after the live file is wiped');
+
+  // pruning keeps the newest N and no more
+  for (let i = 0; i < 5; i++) {
+    await writeFile(cacheFile, JSON.stringify({ ...good, marker: i }));
+    await snapshotCache(cacheFile, { reason: `run-${i}`, keep: 3 });
+  }
+  const pruned = await listBackups(cacheFile);
+  assert.ok(pruned.length <= 4, `expected pruning to a small set, got ${pruned.length}`);
+  console.log(`✓ old snapshots are pruned (kept ${pruned.length}) instead of filling the disk`);
+
+  await rm(dir, { recursive: true, force: true });
+}
+
+/**
+ * Stopping a scan has to be real: in-flight cards finish and stay saved, cards
+ * that never started stay unscored (so "Scan unscored" resumes), and the server
+ * keeps running. A 3,000-card run is hours long — being trapped in it is not an
+ * acceptable answer.
+ */
+async function testStopScan() {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sillyscore-stop-'));
+  const charactersDir = path.join(dir, 'characters');
+  await mkdir(charactersDir, { recursive: true });
+  for (let i = 0; i < 40; i++) {
+    await writeFile(path.join(charactersDir, `card-${String(i).padStart(2, '0')}.png`), buildFakePng({
+      spec: 'chara_card_v2',
+      data: { name: `Card ${i}`, description: 'A description long enough to be scorable.', first_mes: 'hi', alternate_greetings: [] },
+    }));
+  }
+
+  // A deliberately slow API, so the scan is still going when we stop it.
+  const slowApi = createServer((req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          fields: { description: { score: 7, strengths: 's', weaknesses: 'w', suggestions: 'x' } },
+          overall_score: 7, top_priority_improvements: [], summary: 's',
+        }) }, finish_reason: 'stop' }],
+      }));
+    }, 300);
+  });
+  await new Promise((r) => slowApi.listen(0, r));
+  const apiPort = slowApi.address().port;
+
+  const { startServer } = await import('../src/server.js');
+  const { DEFAULT_WEIGHTS } = await import('../src/scorer.js');
+  const server = await startServer({
+    charactersDir,
+    cacheFile: path.join(dir, 'data', 'cache.json'),
+    trashDir: path.join(dir, 'data', 'trash'),
+    configPath: path.join(dir, 'config.json'),
+    provider: 'openai',
+    baseURL: `http://localhost:${apiPort}`,
+    apiKey: 'test',
+    model: 'test-model',
+    concurrency: 2,
+    weights: DEFAULT_WEIGHTS,
+    port: 4182,
+  });
+
+  try {
+    const { jobId, total } = await (await fetch('http://localhost:4182/api/score/batch', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'all' }),
+    })).json();
+    assert.equal(total, 40);
+
+    // let a few land, then stop
+    await new Promise((r) => setTimeout(r, 1200));
+    const stop = await (await fetch(`http://localhost:4182/api/score/batch/${jobId}/stop`, { method: 'POST' })).json();
+    assert.equal(stop.id, jobId);
+
+    let job;
+    for (let i = 0; i < 60; i++) {
+      job = await (await fetch(`http://localhost:4182/api/score/batch/${jobId}`)).json();
+      if (job.status !== 'running') break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert.equal(job.status, 'stopped', `expected the job to end as stopped, got ${job.status}`);
+    assert.ok(job.done > 0, 'the cards that were in flight should have finished and been kept');
+    assert.ok(job.skipped > 0, 'the cards that had not started should be skipped, not scored');
+    assert.equal(job.done + job.errors + job.skipped, 40);
+    console.log(`✓ stopping a scan keeps the ${job.done} scores already finished and skips the remaining ${job.skipped}`);
+
+    // the scores that landed are on disk, and the rest are still pending work
+    const { hashedCacheFileFor } = await import('../src/cachePath.js');
+    const cache = JSON.parse(await readFile(hashedCacheFileFor(path.join(dir, 'data', 'cache.json'), charactersDir), 'utf8'));
+    assert.equal(Object.keys(cache.cards).length, job.done + job.errors);
+    console.log(`✓ every score from the stopped run is saved to disk (${Object.keys(cache.cards).length} entries)`);
+
+    const resume = await (await fetch('http://localhost:4182/api/score/batch', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'unscored' }),
+    })).json();
+    assert.equal(resume.total, job.skipped + job.errors, '"Scan unscored" should pick up exactly what was left');
+    await fetch(`http://localhost:4182/api/score/batch/${resume.jobId}/stop`, { method: 'POST' });
+    console.log(`✓ "Scan unscored" resumes with exactly the ${resume.total} cards the stop left behind`);
+  } finally {
+    server.close();
+    slowApi.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 main().catch((err) => {

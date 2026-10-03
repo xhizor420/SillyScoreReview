@@ -238,12 +238,48 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
   };
 }
 
+/**
+ * Splits an improve prompt back into its per-field original text, so the mock
+ * provider can return a plausible edit of the real card instead of lorem ipsum.
+ */
+function parseImprovePromptFields(user) {
+  const out = {};
+  const parts = user.split(/^### (\w+)[^\n]*$/m);
+  for (let i = 1; i < parts.length; i += 2) {
+    const field = parts[i];
+    const body = (parts[i + 1] || '')
+      .split('\n')
+      .filter((line) => !line.startsWith('Critique of this field:'))
+      .join('\n')
+      .trim();
+    // Drop the trailing instruction paragraph that follows the last field.
+    const cut = body.indexOf('\nRewrite only the fields');
+    out[field] = (cut === -1 ? body : body.slice(0, cut)).trim();
+  }
+  return out;
+}
+
 /** Deterministic offline provider for --dry-run / self-tests. No network calls, no cost. */
 function createMockProvider() {
   return {
     name: 'mock',
     model: 'mock-heuristic',
-    async chat({ user }) {
+    async chat({ system, user }) {
+      // An improve request wants rewritten card text back, not scores. Return a
+      // deterministic *tightened* edit — shorter than the original, macros kept
+      // — so the offline path exercises the real review/save flow.
+      if (/senior editor for SillyTavern character cards/.test(system || '')) {
+        const originals = parseImprovePromptFields(user);
+        const fields = {};
+        for (const [field, text] of Object.entries(originals)) {
+          if (!text) continue;
+          const words = text.split(/\s+/);
+          const kept = words.slice(0, Math.max(3, Math.ceil(words.length * 0.8))).join(' ');
+          fields[field] = { text: kept, why: 'Mock provider: trimmed filler, no real editing performed.' };
+        }
+        return JSON.stringify({ fields, headline: 'Mock provider edit — use a real provider for actual rewrites.' });
+      }
+
       // crude heuristic: score inversely correlated with filler/repetition, just for pipeline testing
       const lengthPenalty = Math.min(3, Math.max(0, (user.length - 3000) / 4000));
       const base = 7 - lengthPenalty;

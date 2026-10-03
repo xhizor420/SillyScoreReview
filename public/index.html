@@ -47,6 +47,7 @@
   </div>
   <div class="scan-head">
     <div class="scan-stats" id="scanStats"></div>
+    <button id="stopScanBtn" class="danger">Stop scan</button>
     <button id="hideScanPanelBtn" class="secondary hidden">Hide</button>
   </div>
   <div class="scan-columns">
@@ -168,6 +169,12 @@
     <button id="saveSettingsBtn">Save settings</button>
   </div>
   <p id="settingsMsg" class="folder-hint"></p>
+
+  <div class="settings-field">
+    <label>Score backups</label>
+    <p class="folder-hint">Taken automatically when the dashboard starts, before a “Rescore all”, and every 250 cards during a scan. Restore one by closing the dashboard and running <code>node src/cli.js restore-backup &lt;name&gt;</code>.</p>
+    <ul id="backupList" class="backup-list"></ul>
+  </div>
 </aside>
 
 <div id="modalBackdrop" class="modal-backdrop hidden">

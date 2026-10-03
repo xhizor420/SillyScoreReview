@@ -188,6 +188,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .dupe-best { background: rgba(79,191,122,0.15); color: var(--green); border: 1px solid var(--green); }
 .dupe-worse { background: rgba(229,88,107,0.12); color: var(--red); border: 1px solid var(--red); }
+.uplift-up { background: rgba(79,191,122,0.15); color: var(--green); border: 1px solid var(--green); }
+.uplift-down { background: rgba(229,88,107,0.12); color: var(--red); border: 1px solid var(--red); }
 .dupe-link { cursor: pointer; font-family: inherit; }
 .dupe-link:hover { filter: brightness(1.35); text-decoration: underline; }
 
@@ -332,6 +334,66 @@ body.select-mode .card-checkbox { width: 26px; height: 26px; }
   font-weight: 700;
 }
 
+.uplift {
+  margin: 12px 0; padding: 10px 12px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  font-size: 13px; font-weight: 600;
+}
+.uplift.is-good { border-color: var(--green); color: var(--green); background: rgba(79,191,122,0.10); }
+.uplift.is-bad { border-color: var(--red); color: var(--red); background: rgba(229,88,107,0.10); }
+
+/* --- card editor / AI improvement review --- */
+.editor-intro { margin-bottom: 8px; }
+.editor-intro p { margin: 4px 0; }
+.editor-working { color: var(--accent); font-weight: 600; }
+
+.editor-row {
+  border-top: 1px solid var(--border);
+  padding: 14px 0;
+}
+.editor-row.is-changed { border-left: 3px solid var(--accent); padding-left: 10px; }
+.token-delta { font-size: 11.5px; font-weight: 700; color: var(--text-dim); }
+.token-delta.is-good { color: var(--green); }
+.token-delta.is-bad { color: var(--red); }
+
+.editor-warnings:not(:empty) { margin-top: 8px; }
+.editor-warning {
+  padding: 6px 8px; margin-top: 4px; border-radius: 6px; font-size: 12px;
+  background: rgba(224,178,58,0.12); border: 1px solid var(--yellow); color: var(--yellow);
+}
+
+.before-block { margin-top: 8px; }
+.before-block > summary {
+  cursor: pointer; font-size: 11.5px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em; user-select: none;
+}
+.before-block > summary:hover { color: var(--accent); }
+
+.editor-text {
+  width: 100%; margin-top: 8px; padding: 10px; resize: vertical;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.editor-text:focus { outline: none; border-color: var(--accent); }
+.editor-row-actions { margin-top: 6px; }
+.editor-row-actions button { font-size: 11.5px; padding: 4px 8px; }
+
+.editor-footer {
+  position: sticky; bottom: -20px; margin-top: 16px; padding: 12px 0 4px;
+  background: var(--panel); border-top: 1px solid var(--border);
+}
+.editor-check { display: block; margin-bottom: 10px; font-size: 13px; color: var(--text-dim); }
+.editor-check input { margin-right: 6px; }
+.editor-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.backup-list { list-style: none; padding: 0; margin: 8px 0 0; max-height: 30vh; overflow-y: auto; }
+.backup-list li {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 11.5px;
+}
+.backup-list .dim { color: var(--text-dim); }
+
 @media (max-width: 760px) {
   .topbar { flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 12px; }
   .topbar-title { flex-direction: column; align-items: flex-start; gap: 0; }
@@ -360,7 +422,13 @@ body.select-mode .card-checkbox { width: 26px; height: 26px; }
   /* Side panels become full-screen sheets. */
   .trash-panel { width: 100%; max-width: 100%; }
   .modal { padding: 16px; }
-  .modal-actions button { min-height: 44px; flex: 1; }
+  .modal-actions { flex-wrap: wrap; }
+  .modal-actions button { min-height: 44px; flex: 1 1 45%; }
+  .editor-buttons button { min-height: 44px; flex: 1 1 100%; }
+  .editor-text { font-size: 13px; }
+  .editor-row-actions button { min-height: 36px; }
+  .scan-head { flex-wrap: wrap; gap: 8px; }
+  #stopScanBtn, #hideScanPanelBtn { min-height: 42px; }
 }
 
 @media (max-width: 420px) {

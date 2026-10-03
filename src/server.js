@@ -8,10 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from './llmClient.js';
 import { scoreCard } from './scorer.js';
+import { improveCard } from './improver.js';
+import { serializeCard } from './cardWriter.js';
 import { Store } from './store.js';
 import { runPool } from './concurrency.js';
 import { resolveCacheFile } from './cachePath.js';
 import { classifyError } from './errorKinds.js';
+import { snapshotCache, listBackups } from './backup.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -39,6 +42,9 @@ export async function startServer(config) {
     let store = stores.get(key);
     if (!store) {
       const file = await resolveCacheFile(config.cacheFile, key);
+      // Snapshot before this process starts writing to it. Scores are hours of
+      // API time; one bad session should never be able to be the end of them.
+      await snapshotCache(file, { reason: 'startup' });
       store = await new Store(file, key).load();
       stores.set(key, store);
     }
@@ -54,6 +60,8 @@ export async function startServer(config) {
       scoredAt: entry?.scoredAt ?? null,
       provider: entry?.provider ?? null,
       error: entry?.error ?? null,
+      previousScore: entry?.previousScore ?? null,
+      improvedFrom: entry?.improvedFrom ?? null,
       isImage: /\.png$/i.test(file),
     };
   }
@@ -62,7 +70,7 @@ export async function startServer(config) {
     const filePath = safeJoin(config.charactersDir, file);
     const buf = await readFile(filePath);
     const card = parseCardFile(buf, file);
-    return { filePath, card, hash: hashCard(card) };
+    return { filePath, buf, card, hash: hashCard(card) };
   }
 
   /** Read-modify-write a patch of fields into config.json on disk, tolerating a missing file. */
@@ -204,6 +212,119 @@ export async function startServer(config) {
     }
   });
 
+  // Ask the model to rewrite the weak parts of a card, informed by its own
+  // critique. Nothing is written here: the proposal comes back for review (and
+  // hand-editing) first, because an unreviewed automatic rewrite of someone's
+  // favourite character is exactly the wrong default.
+  app.post('/api/cards/:id/improve', async (req, res) => {
+    const file = req.params.id;
+    try {
+      const store = await getStore(config.charactersDir);
+      const { card } = await readCardOrThrow(file);
+      const entry = store.get(file);
+      const provider = createProvider(config);
+      const fields = Array.isArray(req.body?.fields) && req.body.fields.length ? req.body.fields : null;
+      const proposal = await improveCard(card, entry?.result, provider, { fields });
+      const before = {};
+      for (const field of Object.keys(proposal.fields)) before[field] = card.fields[field] || '';
+      res.json({
+        id: file,
+        name: card.name,
+        hadCritique: Boolean(entry?.result && !entry.result.partial),
+        previousScore: entry?.result?.overall_score ?? null,
+        before,
+        ...proposal,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message, kind: classifyError(err).kind });
+    }
+  });
+
+  /** Picks a free filename next to `file`, e.g. "Raven.png" -> "Raven (improved).png". */
+  async function freeFilename(base, ext, suffix) {
+    for (let n = 0; n < 200; n++) {
+      const name = n === 0 ? `${base}${suffix}${ext}` : `${base}${suffix} ${n + 1}${ext}`;
+      try {
+        await stat(safeJoin(config.charactersDir, name));
+      } catch {
+        return name;
+      }
+    }
+    return `${base}${suffix} ${Date.now()}${ext}`;
+  }
+
+  // Writes edited field text back into a card. Used by the improve review step
+  // and by hand-editing a card in the dashboard — same path, same safeguards.
+  app.post('/api/cards/:id/save', async (req, res) => {
+    const file = req.params.id;
+    const { fields = {}, name, mode = 'new', rescore = false } = req.body || {};
+    if (!fields || typeof fields !== 'object' || !Object.keys(fields).length) {
+      return res.status(400).json({ error: 'No edited fields were sent' });
+    }
+    if (mode !== 'new' && mode !== 'replace') {
+      return res.status(400).json({ error: `Unknown save mode "${mode}"` });
+    }
+
+    try {
+      const store = await getStore(config.charactersDir);
+      const { buf, card } = await readCardOrThrow(file);
+      const previousScore = store.get(file)?.result?.overall_score ?? null;
+
+      const { bytes } = serializeCard({ filename: file, originalBuffer: buf, raw: card.raw, fields, name });
+
+      let targetFile = file;
+      let backedUpAs = null;
+      if (mode === 'new') {
+        const ext = path.extname(file);
+        targetFile = await freeFilename(file.slice(0, file.length - ext.length), ext, ' (improved)');
+      } else {
+        // Replacing in place keeps a restorable copy of the original in trash,
+        // so an edit that turns out worse is never a one-way door.
+        backedUpAs = `${Date.now()}-before-edit-${file}`;
+        await copyFile(safeJoin(config.charactersDir, file), safeJoin(config.trashDir, backedUpAs));
+      }
+
+      const targetPath = safeJoin(config.charactersDir, targetFile);
+      await writeFile(`${targetPath}.tmp`, bytes);
+      await rename(`${targetPath}.tmp`, targetPath);
+
+      // The file changed, so any score attached to it is no longer about this
+      // text. Drop the stale result but remember what it used to score, so the
+      // before/after is visible instead of lost.
+      const { card: savedCard, hash } = await readCardOrThrow(targetFile);
+      store.stage(targetFile, {
+        hash,
+        name: savedCard.name,
+        tokenEstimate: totalCardTokens(savedCard),
+        scoredAt: null,
+        provider: null,
+        model: null,
+        result: null,
+        error: null,
+        previousScore,
+        improvedFrom: mode === 'new' ? file : null,
+        editedAt: new Date().toISOString(),
+      });
+      await store.save();
+
+      let entry = store.get(targetFile);
+      if (rescore) {
+        try {
+          const scored = await scoreOne(targetFile, createProvider(config), store);
+          entry = { ...scored, previousScore, improvedFrom: mode === 'new' ? file : null };
+          await store.set(targetFile, entry);
+        } catch (err) {
+          // The save itself succeeded; a failed score is a separate, retryable problem.
+          entry = { ...store.get(targetFile), scoreError: err.message };
+        }
+      }
+
+      res.json({ file: targetFile, mode, backedUpAs, previousScore, entry });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/score/batch', async (req, res) => {
     const { ids, scope = 'selected', limit, rescore = false } = req.body || {};
     let files;
@@ -235,6 +356,12 @@ export async function startServer(config) {
       return res.status(500).json({ error: err.message });
     }
 
+    // "Rescore all" overwrites every existing result. Snapshot first so the
+    // previous run's scores survive a rescore you didn't mean to start.
+    if (rescore && files.length > 1) {
+      await snapshotCache(store.filePath, { reason: 'before-rescore' });
+    }
+
     const jobId = randomUUID();
     const job = {
       id: jobId,
@@ -248,6 +375,8 @@ export async function startServer(config) {
       concurrency: resolveConcurrency(config).concurrency,
       model: config.model || null,
       inFlight: 0,
+      skipped: 0,       // cards never started because the scan was stopped
+      cancelRequested: false,
       active: [],       // cards currently awaiting a response, with elapsed time
       recent: [],       // rolling feed of the last few completions
       latencies: [],    // per-card wall time, for a live median
@@ -265,6 +394,13 @@ export async function startServer(config) {
         return;
       }
       await runPool(files, job.concurrency, async (file) => {
+        // A 3,000-card scan is a multi-hour commitment. Being able to stop it
+        // without killing the server (and losing the scores already written)
+        // is not a nicety.
+        if (job.cancelRequested) {
+          job.skipped++;
+          return;
+        }
         const startedMs = Date.now();
         job.inFlight++;
         job.active.push({ file, startedMs });
@@ -280,6 +416,9 @@ export async function startServer(config) {
         try {
           const entry = await scoreOne(file, provider, store);
           job.done++;
+          // Checkpoint a long run periodically, so a scan interrupted after
+          // hours leaves a snapshot behind and not just a live file.
+          if (job.done % 250 === 0) snapshotCache(store.filePath, { reason: 'scan-checkpoint' });
           const outcome = { name: entry.name, overallScore: entry.result.overall_score };
           job.results.push({ file, ...outcome });
           settle(outcome);
@@ -296,7 +435,7 @@ export async function startServer(config) {
           settle({ error: err.message });
         }
       });
-      job.status = 'done';
+      job.status = job.cancelRequested ? 'stopped' : 'done';
       job.finishedAt = new Date().toISOString();
     })();
   });
@@ -321,6 +460,8 @@ export async function startServer(config) {
       total: job.total,
       done: job.done,
       errors: job.errors,
+      skipped: job.skipped,
+      stopping: job.cancelRequested && job.status === 'running',
       inFlight: job.inFlight,
       concurrency: job.concurrency,
       model: job.model,
@@ -331,6 +472,17 @@ export async function startServer(config) {
       active: job.active.map((a) => ({ file: a.file, elapsedMs: now - a.startedMs })),
       recent: job.recent,
     });
+  });
+
+  // Stops a scan without stopping the server. Cards already scored stay scored
+  // — every result is written to the cache as it lands — and the cards that
+  // never started are simply still unscored, so "Scan unscored" picks up
+  // exactly where this left off.
+  app.post('/api/score/batch/:jobId/stop', (req, res) => {
+    const job = jobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Unknown job id' });
+    job.cancelRequested = true;
+    res.json({ id: job.id, status: job.status, inFlight: job.inFlight });
   });
 
   app.post('/api/cards/delete', async (req, res) => {
@@ -452,6 +604,21 @@ export async function startServer(config) {
     }
 
     res.json({ destination: target, copied, skipped, errors });
+  });
+
+  app.get('/api/backups', async (req, res) => {
+    try {
+      const store = await getStore(config.charactersDir);
+      const all = await listBackups(config.cacheFile);
+      const base = path.basename(store.filePath, '.json');
+      res.json({
+        liveFile: store.filePath,
+        backups: all.filter((b) => b.name.startsWith(`${base}--`)),
+        otherBackups: all.filter((b) => !b.name.startsWith(`${base}--`)).length,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get('/api/trash', async (req, res) => {

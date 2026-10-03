@@ -10,6 +10,14 @@ card are judged the same way: does the writing actually work, is it specific, do
 give the model something to play. The prompt explicitly tells the model to call out
 padding and redundancy as weaknesses.
 
+It also **fixes** cards, not just grades them: the model rewrites the weak fields using
+its own critique, you review the result side by side and edit it yourself, and only then
+does anything get written — as a new card by default. See *Improving a card*, below.
+
+The full loop it's built for: score everything → cull what's bad → group the duplicate
+Ravens and keep the highest scorer → improve that one → see the new score next to the old
+one.
+
 ## Scores showing in a tab but missing from the data file?
 
 **Do not close or reload that tab.** The scores are still in its memory and can be
@@ -101,6 +109,73 @@ filename is copied as `Name (2).png` so both survive.
 Scores travel with the copies. The destination folder gets its own score cache entries
 for the cards you copied, so pointing the dashboard at that folder later shows the same
 scores instead of demanding a rescan.
+
+## Improving a card
+
+Scoring tells you a card is a 4/10. **Improve with AI**, on the card itself, does
+something about it: the model gets the card *and its own critique of that card*, and
+rewrites only the fields that need work.
+
+What comes back is a **draft, not a file**. You get, per field:
+
+- the original and the rewrite side by side, each editable;
+- a live token count — `180 → 140 tok (-40)`, green when it shrank, red when it grew;
+- the one-line reason the model gives for each change;
+- **Revert this field** to throw away any rewrite you don't like.
+
+Then save it as a **new card** (the default — the original is untouched and keeps its
+score) or **replace the original** (a copy of the pre-edit file goes to Trash, so it's
+undoable). Leave *Score it after saving* ticked and the new card is scored straight
+away, so the card and the grid both show the before/after: **6.1 → 8.4 (+2.3)**.
+
+Because the improved card keeps the character's name, it lands in the same duplicate
+group as its parent — so after it scores higher, **Select all but the best of each**
+picks the old one for deletion. The whole loop closes.
+
+Two rules are enforced rather than merely requested, because a rewrite gets them wrong
+in ways that are easy to miss:
+
+| | |
+|---|---|
+| **No padding** | The prompt forbids making any field longer, and the UI flags a rewrite that grew anyway. A longer card is a worse card — that's the entire premise of this tool. |
+| **Keep the macros** | If the original used `{{user}}` or `{{char}}` and the rewrite has none left, you get a warning. Dropping a *repeated* macro is fine editing and is not flagged. |
+
+The model is also told, in priority order, to keep the same character (no invented
+backstory, powers or relatives), fix exactly what the critique named, and preserve the
+card's formatting conventions — `<START>` blocks, the narrative person and tense of
+`first_mes`, and so on.
+
+Nothing else in the card is touched. Lorebooks (`character_book`), creator notes, tags,
+`extensions` and the artwork itself are copied through byte-for-byte; only the text you
+changed is rewritten.
+
+## Editing a card by hand
+
+**Edit text** on any card opens the same editor with the card's own text, unchanged, in
+editable boxes — no model involved. Fix a typo, delete a line, rewrite a greeting, save.
+This works from a phone too, which is the easiest way to clean up cards without going
+near the machine the files live on.
+
+## Stopping a scan
+
+A scan of a few thousand cards runs for hours. **Stop scan** in the progress panel ends
+it without killing the server: cards already in flight finish and are saved, cards that
+hadn't started are left alone, and **Scan unscored** afterwards picks up exactly where it
+left off. Nothing is lost and nothing is scored twice.
+
+## Your scores are backed up automatically
+
+The score file is snapshotted into `data/backups/` when the dashboard opens a folder,
+before a **Rescore all**, before an import or a cache merge, and every 250 cards during a
+long scan. The last 12 snapshots per folder are kept.
+
+```
+node src/cli.js backups                     # list them, newest first
+node src/cli.js restore-backup <name>       # put one back (close the dashboard first)
+```
+
+Restoring saves the current file as a snapshot too, so a restore is itself undoable. The
+Settings panel lists the snapshots it has for the folder you're looking at.
 
 ## Using it from your phone
 
@@ -195,6 +270,10 @@ Settings/folder pickers mean you never actually need to hand-edit `config.json`.
    thumbnail and score at a glance, sort/filter by score or token count, open a card for
    the full breakdown, and delete (→ trash, reversible) or bulk-delete cards you decide
    to cut.
+3. From that dashboard you can also act on what the scores tell you: group same-name
+   duplicates and keep the best, copy keepers into another folder, and hand a weak card
+   back to the model to be rewritten from its own critique — reviewing every change
+   before it is written.
 
 The rubric sent to the model, verbatim:
 
@@ -358,7 +437,15 @@ for tens of minutes per card.
 - Deleting from the dashboard is a **move to `data/trash/`**, not a permanent delete —
   restore anything from the Trash panel if you change your mind. Emptying the trash is
   the only irreversible step, and it asks for confirmation.
-- The scanner never modifies your card files, only reads them.
+- **Scanning never modifies your card files**, only reads them. The only things that
+  write a card are **Improve with AI** and **Edit text**, and only after you press save:
+  the default saves a *new* card and leaves the original alone, and replacing one in
+  place keeps a copy of the previous version in Trash first.
+- A card rewrite copies the artwork through byte-for-byte and preserves everything the
+  tool doesn't model — lorebook, creator notes, tags, `extensions` — so nothing is lost
+  that wasn't deliberately edited.
+- Your score file is snapshotted to `data/backups/` before anything rewrites it
+  (`node src/cli.js backups` lists them).
 - Nothing here talks to SillyTavern's server or database — it only reads the same PNG
   files from disk that SillyTavern reads. Safe to run while SillyTavern is running.
 

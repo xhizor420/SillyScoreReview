@@ -14,6 +14,7 @@ import { classifyError } from './errorKinds.js';
 import { resolveCacheFile, listCaches } from './cachePath.js';
 import { mergeCaches } from './mergeCaches.js';
 import { importScores } from './importScores.js';
+import { snapshotCache, listBackups, restoreBackup, backupDirFor } from './backup.js';
 
 const DEFAULT_CONFIG = {
   charactersDir: './characters',
@@ -285,6 +286,20 @@ async function cmdServe(args) {
   await startServer(config);
 }
 
+/**
+ * True when the dashboard is listening. Anything that rewrites the score file
+ * from the CLI has to check this first: the server holds the cache in memory
+ * and rewrites it wholesale on its next save, which silently undoes the work.
+ */
+async function serverIsRunning(config) {
+  return new Promise((resolve) => {
+    const sock = net.createConnection({ host: '127.0.0.1', port: config.port, timeout: 700 });
+    sock.on('connect', () => { sock.destroy(); resolve(true); });
+    sock.on('error', () => resolve(false));
+    sock.on('timeout', () => { sock.destroy(); resolve(false); });
+  });
+}
+
 async function main() {
   const [, , cmd, ...rest] = process.argv;
   const args = parseArgs(rest);
@@ -341,12 +356,7 @@ async function main() {
       // The dashboard server keeps the score file in memory and rewrites the
       // whole thing on its next save — so importing underneath a running server
       // gets silently undone the moment it scores or deletes anything.
-      const serverUp = await new Promise((resolve) => {
-        const sock = net.createConnection({ host: '127.0.0.1', port: config.port, timeout: 700 });
-        sock.on('connect', () => { sock.destroy(); resolve(true); });
-        sock.on('error', () => resolve(false));
-        sock.on('timeout', () => { sock.destroy(); resolve(false); });
-      });
+      const serverUp = await serverIsRunning(config);
       if (serverUp && !args.force) {
         console.error(`The dashboard server is still running on port ${config.port}.`);
         console.error('It holds the score file in memory and would overwrite this import');
@@ -369,6 +379,10 @@ async function main() {
         console.error('re-run the recovery snippet or the Export scores button.');
         process.exitCode = 1;
         break;
+      }
+      if (!args['dry-run']) {
+        const snap = await snapshotCache(await resolveCacheFile(config.cacheFile, config.charactersDir), { reason: 'before-import' });
+        if (snap) console.log(`Backup : ${snap.file} (${snap.cardCount} cards)`);
       }
       const r = await importScores({
         cacheFile: config.cacheFile,
@@ -420,6 +434,7 @@ async function main() {
       const config = await loadConfig(args);
       const dryRun = Boolean(args['dry-run']);
       const prune = !args['no-prune'];
+      if (!dryRun) await snapshotCache(await resolveCacheFile(config.cacheFile, config.charactersDir), { reason: 'before-merge' });
       const r = await mergeCaches({ cacheFile: config.cacheFile, charactersDir: config.charactersDir, prune, dryRun });
 
       console.log(`${dryRun ? 'DRY RUN — nothing written.\n' : ''}Merging into: ${r.dest}\n`);
@@ -468,6 +483,55 @@ async function main() {
       if (!ok) process.exitCode = 1;
       break;
     }
+    case 'backups': {
+      const config = await loadConfig(args);
+      const active = await resolveCacheFile(config.cacheFile, config.charactersDir);
+      const list = await listBackups(config.cacheFile);
+      console.log(`Live score file: ${active}`);
+      console.log(`Backups folder : ${backupDirFor(config.cacheFile)}\n`);
+      if (!list.length) {
+        console.log('No backups yet. One is taken automatically when the dashboard starts');
+        console.log('and before anything rewrites your scores (import, merge, rescore-all).');
+        break;
+      }
+      for (const b of list) {
+        console.log(`  ${b.name}`);
+        console.log(`      ${b.cardCount} cards (${b.scoredCount} scored) · ${(b.sizeBytes / 1024).toFixed(0)} KB · ${b.takenAt}`);
+        if (b.charactersDir) console.log(`      folder: ${b.charactersDir}`);
+      }
+      console.log(`\nRestore one with:\n  node src/cli.js restore-backup "${list[0].name}"`);
+      break;
+    }
+    case 'restore-backup': {
+      const config = await loadConfig(args);
+      const wanted = args._[0];
+      const list = await listBackups(config.cacheFile);
+      if (!wanted) {
+        console.error('Usage: node src/cli.js restore-backup <backup file name>');
+        console.error('Run "node src/cli.js backups" to see the names.');
+        process.exitCode = 1;
+        break;
+      }
+      const match = list.find((b) => b.name === wanted || b.file === wanted || b.name.includes(wanted));
+      if (!match) {
+        console.error(`No backup matching "${wanted}".`);
+        if (list.length) console.error(`Available: ${list.map((b) => b.name).join(', ')}`);
+        process.exitCode = 1;
+        break;
+      }
+      const dest = await resolveCacheFile(config.cacheFile, config.charactersDir);
+      if (await serverIsRunning(config)) {
+        console.error(`\nThe dashboard is running on port ${config.port}. It holds the scores in memory and`);
+        console.error('would overwrite the restore on its next save. Close it first, then re-run this.');
+        process.exitCode = 1;
+        break;
+      }
+      const r = await restoreBackup(match.file, dest);
+      console.log(`Restored ${r.cardCount} cards from:\n  ${match.name}\ninto:\n  ${dest}`);
+      if (r.previousSavedAs) console.log(`\nThe file it replaced was saved as:\n  ${r.previousSavedAs}`);
+      console.log('\nCheck it with: node src/cli.js stats');
+      break;
+    }
     default:
       console.log(`SillyScoreReview — score & clean up SillyTavern character cards
 
@@ -491,6 +555,13 @@ Usage:
   node src/cli.js caches [--config config.json]
         Lists every score-data file and which characters folder each belongs to.
         Use this if scores look like they vanished.
+
+  node src/cli.js backups [--config config.json]
+        Lists automatic score backups (taken on startup and before anything
+        that rewrites your scores).
+
+  node src/cli.js restore-backup <name> [--config config.json]
+        Puts one of those backups back. Saves the current file first.
 
   node src/cli.js stats [--config config.json]
   node src/cli.js serve [--config config.json] [--port 4180]

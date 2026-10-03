@@ -29,6 +29,8 @@ const els = {
   progressLabel: document.getElementById('progressLabel'),
   scanStats: document.getElementById('scanStats'),
   hideScanPanelBtn: document.getElementById('hideScanPanelBtn'),
+  stopScanBtn: document.getElementById('stopScanBtn'),
+  backupList: document.getElementById('backupList'),
   scanActive: document.getElementById('scanActive'),
   scanRecent: document.getElementById('scanRecent'),
   selectionBar: document.getElementById('selectionBar'),
@@ -398,6 +400,25 @@ function renderGrid() {
     const meta = document.createElement('div');
     meta.className = 'card-meta';
     meta.textContent = card.tokenEstimate != null ? `~${card.tokenEstimate} tok` : '';
+
+    // An improved card is only interesting next to what it came from, so the
+    // tile carries the uplift rather than making you open it to find out.
+    if (card.previousScore != null) {
+      const chip = document.createElement('span');
+      if (card.overallScore != null) {
+        const diff = Math.round((card.overallScore - card.previousScore) * 10) / 10;
+        chip.className = `dupe-tag ${diff > 0 ? 'uplift-up' : diff < 0 ? 'uplift-down' : ''}`;
+        chip.textContent = `${card.previousScore} → ${card.overallScore}`;
+        chip.title = `Edited card: was ${card.previousScore}/10, now ${card.overallScore}/10`;
+      } else {
+        chip.className = 'dupe-tag';
+        chip.textContent = 'EDITED · UNSCORED';
+        chip.title = `Edited since it was scored (${card.previousScore}/10 before). Score it to see the new number.`;
+      }
+      meta.appendChild(document.createElement('br'));
+      meta.appendChild(chip);
+    }
+
     if (state.dupeIds.has(card.id)) {
       const key = state.groupOf.get(card.id);
       const isBest = state.bestIds.has(card.id);
@@ -490,11 +511,25 @@ async function openCard(id) {
   let html = `<h2>${escapeHtml(data.name)}</h2>`;
   html += `<div class="modal-actions">
     <button data-action="score">${result ? 'Rescore' : 'Score this card'}</button>
+    <button data-action="improve" title="${result && !result.partial
+      ? 'Rewrites the weak fields using this card\'s own critique. You review and edit the result before anything is saved.'
+      : 'Score this card first for a critique-guided rewrite — or improve it now on the text alone.'}">Improve with AI</button>
+    <button data-action="edit" class="secondary">Edit text</button>
     <button data-action="delete" class="danger">Delete</button>
   </div>`;
 
   if (entry?.error) {
     html += `<p style="color:var(--red)">Last attempt failed: ${escapeHtml(entry.error)}</p>`;
+  }
+
+  if (entry?.previousScore != null && result?.overall_score != null) {
+    const diff = Math.round((result.overall_score - entry.previousScore) * 10) / 10;
+    html += `<div class="uplift ${diff > 0 ? 'is-good' : diff < 0 ? 'is-bad' : ''}">
+      ${entry.improvedFrom ? `Improved from <b>${escapeHtml(entry.improvedFrom)}</b>: ` : 'After editing: '}
+      ${entry.previousScore} → ${result.overall_score} / 10 ${diff > 0 ? `(+${diff})` : diff < 0 ? `(${diff})` : '(no change)'}
+    </div>`;
+  } else if (entry?.previousScore != null && !result) {
+    html += `<div class="uplift">Edited — previously scored ${entry.previousScore}/10. Score it again to see whether it improved.</div>`;
   }
 
   if (result) {
@@ -551,6 +586,9 @@ async function openCard(id) {
     }
   });
 
+  els.modalBody.querySelector('[data-action="improve"]').addEventListener('click', () => startImprove(id, data.name));
+  els.modalBody.querySelector('[data-action="edit"]').addEventListener('click', () => startManualEdit(id, data.name, data.fields || {}));
+
   els.modalBody.querySelector('[data-action="delete"]').addEventListener('click', async () => {
     if (!confirm(`Move "${data.name}" to trash?`)) return;
     await api('/api/cards/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [id] }) });
@@ -581,7 +619,9 @@ function renderScanPanel(job) {
   const finished = job.done + job.errors;
   const pct = job.total ? Math.round((finished / job.total) * 100) : 100;
   els.progressFill.style.width = `${pct}%`;
-  els.progressLabel.textContent = `${finished} / ${job.total} processed (${pct}%)`;
+  els.progressLabel.textContent =
+    `${finished} / ${job.total} processed (${pct}%)` +
+    (job.stopping ? ' — stopping, letting in-flight cards finish…' : job.status === 'stopped' ? ` — stopped, ${job.skipped} not started` : '');
 
   // Scored and failed are shown as separate figures on purpose: a run that is
   // failing every card still advances the bar, which previously made a broken
@@ -592,7 +632,7 @@ function renderScanPanel(job) {
     { label: 'In flight', value: `${job.inFlight}/${job.concurrency}` },
     { label: 'Rate', value: job.perHour != null ? `${Math.round(job.perHour)}/hr` : '…' },
     { label: 'Median', value: fmtDuration(job.medianLatencyMs) },
-    { label: 'ETA', value: job.status === 'running' ? fmtDuration(job.etaMs) : 'done' },
+    { label: 'ETA', value: job.stopping ? 'stopping' : job.status === 'running' ? fmtDuration(job.etaMs) : job.status === 'stopped' ? 'stopped' : 'done' },
     { label: 'Elapsed', value: fmtDuration(job.elapsedMs) },
   ];
   els.scanStats.innerHTML = stats
@@ -621,9 +661,15 @@ function renderScanPanel(job) {
     : '<li><span class="dim">nothing yet</span></li>';
 }
 
+let currentJobId = null;
+
 async function pollJob(jobId) {
+  currentJobId = jobId;
   els.scanPanel.classList.remove('hidden');
   els.hideScanPanelBtn.classList.add('hidden'); // only offered once the run ends
+  els.stopScanBtn.classList.remove('hidden');
+  els.stopScanBtn.disabled = false;
+  els.stopScanBtn.textContent = 'Stop scan';
   let lastGridRefresh = Date.now();
   let job;
 
@@ -647,11 +693,22 @@ async function pollJob(jobId) {
     }
   }
 
+  currentJobId = null;
   await loadCards();
   renderScanPanel(job);
   // Leave the finished summary up so the run's outcome is reviewable, but let
   // it be dismissed now that nothing is streaming into it.
   els.hideScanPanelBtn.classList.remove('hidden');
+  els.stopScanBtn.classList.add('hidden');
+
+  if (job.status === 'stopped') {
+    alert(
+      `Scan stopped. ${job.done} card${job.done === 1 ? '' : 's'} scored${job.errors ? `, ${job.errors} failed` : ''}` +
+      `${job.skipped ? `, ${job.skipped} not started` : ''}.\n\n` +
+      'Every score that finished is saved. "Scan unscored" picks up exactly where this left off.',
+    );
+    return;
+  }
 
   if (job.errors > 0) {
     // Say *why* they failed rather than only how many — the fix for timeouts
@@ -762,6 +819,19 @@ els.clearSelectionBtn.addEventListener('click', () => {
 // The point of the filters is to isolate a group (e.g. "Score below 4") and act
 // on all of it at once — ticking several hundred checkboxes by hand is not a
 // workflow. This selects/deselects exactly what the current filter+search shows.
+els.stopScanBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  els.stopScanBtn.disabled = true;
+  els.stopScanBtn.textContent = 'Stopping…';
+  try {
+    await api(`/api/score/batch/${currentJobId}/stop`, { method: 'POST' });
+  } catch (err) {
+    els.stopScanBtn.disabled = false;
+    els.stopScanBtn.textContent = 'Stop scan';
+    alert(`Could not stop the scan: ${err.message}`);
+  }
+});
+
 els.hideScanPanelBtn.addEventListener('click', () => els.scanPanel.classList.add('hidden'));
 
 els.selectModeBtn.addEventListener('click', () => {
@@ -947,8 +1017,27 @@ els.copyHereBtn.addEventListener('click', async () => {
 
 let settingsPresets = {};
 
+async function loadBackups() {
+  try {
+    const data = await api('/api/backups');
+    if (!data.backups.length) {
+      els.backupList.innerHTML = '<li class="dim">No backups yet — one is taken the first time the dashboard opens this folder.</li>';
+      return;
+    }
+    els.backupList.innerHTML = data.backups
+      .map((b) => `<li>
+        <span>${escapeHtml(b.name.split('--').slice(1).join(' · '))}</span>
+        <span class="dim">${b.scoredCount} scored / ${b.cardCount} cards</span>
+      </li>`)
+      .join('');
+  } catch (err) {
+    els.backupList.innerHTML = `<li class="dim">Could not read backups: ${escapeHtml(err.message)}</li>`;
+  }
+}
+
 async function openSettings() {
   els.settingsPanel.classList.remove('hidden');
+  loadBackups();
   els.settingsMsg.textContent = 'Loading…';
   try {
     const data = await api('/api/settings');
@@ -1059,6 +1148,228 @@ els.saveSettingsBtn.addEventListener('click', async () => {
     els.saveSettingsBtn.disabled = false;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Card editor / AI improvement
+//
+// Scoring a collection is only half the job — the point of finding the best
+// Raven is to then make it better. This is the "improve it" half: the model
+// rewrites the weak fields using its own critique, you review the result field
+// by field (and hand-edit it), and only then does anything touch a file. Saving
+// defaults to a NEW card, so the original is never the thing being gambled.
+// ---------------------------------------------------------------------------
+
+let editor = null; // { id, name, source, headline, previousScore, rows: [...] }
+
+function tokensOf(text) {
+  return Math.ceil((text || '').length / 4);
+}
+
+function fieldLabel(field) {
+  return field.replace(/_/g, ' ');
+}
+
+/** Rows for the "Improve with AI" review: only the fields the model rewrote. */
+function rowsFromProposal(data) {
+  return Object.entries(data.fields).map(([field, f]) => ({
+    field,
+    before: data.before[field] ?? '',
+    after: f.text,
+    why: f.why || '',
+    inflated: f.inflated,
+    lostMacros: f.lostMacros,
+  }));
+}
+
+/** Rows for hand-editing: every field that has text, unchanged to start with. */
+function rowsFromCard(fields) {
+  return Object.entries(fields)
+    .filter(([, text]) => text && text.trim())
+    .map(([field, text]) => ({ field, before: text, after: text, why: '', inflated: false, lostMacros: false }));
+}
+
+function renderEditor() {
+  const { id, name, source, headline, previousScore, rows } = editor;
+  const improving = source === 'improve';
+
+  let html = `<h2>${improving ? 'Improved draft' : 'Edit card'}: ${escapeHtml(name)}</h2>`;
+
+  html += `<div class="editor-intro">`;
+  if (improving) {
+    html += `<p>${escapeHtml(headline || 'The model rewrote the fields below.')}</p>
+      <p class="folder-hint">Nothing has been saved yet. Edit any of it by hand, then save — by default as a
+      <b>new card</b>, leaving the original untouched.${previousScore != null ? ` The original scores <b>${previousScore}/10</b>.` : ''}</p>`;
+  } else {
+    html += `<p class="folder-hint">Edit the card's own text. Saving as a new card leaves the original alone;
+      replacing it keeps a restorable copy in Trash either way.</p>`;
+  }
+  html += `</div>`;
+
+  html += rows
+    .map((row, i) => {
+      const changed = row.after !== row.before;
+      return `<div class="editor-row ${changed ? 'is-changed' : ''}" data-row="${i}">
+        <div class="field-title">
+          <span>${escapeHtml(fieldLabel(row.field))}</span>
+          <span class="token-delta" data-delta="${i}"></span>
+        </div>
+        ${row.why ? `<div class="field-sub"><b>Change:</b> ${escapeHtml(row.why)}</div>` : ''}
+        <div class="editor-warnings" data-warn="${i}"></div>
+        ${row.before
+          ? `<details class="before-block">
+               <summary>Original (${tokensOf(row.before)} tok)</summary>
+               <pre class="card-field-text">${escapeHtml(row.before)}</pre>
+             </details>`
+          : ''}
+        <textarea class="editor-text" data-text="${i}" rows="8" spellcheck="false">${escapeHtml(row.after)}</textarea>
+        <div class="editor-row-actions">
+          <button class="secondary" data-revert="${i}">Revert this field</button>
+        </div>
+      </div>`;
+    })
+    .join('');
+
+  html += `<div class="editor-footer">
+    <label class="editor-check"><input type="checkbox" id="editorRescore" checked /> Score it after saving</label>
+    <div class="editor-buttons">
+      <button data-save="new">Save as new card</button>
+      <button class="secondary" data-save="replace">Replace original</button>
+      <button class="secondary" data-cancel="1">Cancel</button>
+    </div>
+    <p id="editorMsg" class="folder-hint"></p>
+  </div>`;
+
+  els.modalBody.innerHTML = html;
+
+  // Token counts and warnings update as you type, because the single most
+  // useful signal while editing a card is "am I making this longer again?".
+  function refreshRow(i) {
+    const row = editor.rows[i];
+    const ta = els.modalBody.querySelector(`[data-text="${i}"]`);
+    row.after = ta.value;
+    const before = tokensOf(row.before);
+    const after = tokensOf(row.after);
+    const diff = after - before;
+    const delta = els.modalBody.querySelector(`[data-delta="${i}"]`);
+    const sign = diff > 0 ? '+' : '';
+    delta.textContent = `${before} → ${after} tok (${sign}${diff})`;
+    delta.className = `token-delta ${diff > Math.max(10, before * 0.15) ? 'is-bad' : diff < 0 ? 'is-good' : ''}`;
+
+    const warnings = [];
+    if (diff > Math.max(10, before * 0.15) && before >= 40) {
+      warnings.push('Longer than the original — a padded card scores worse, not better.');
+    }
+    // Losing a repeated macro is fine editing; losing the last one means the
+    // card no longer addresses the user (or itself) at all, which breaks it.
+    const dropped = ['user', 'char'].filter((m) => {
+      const re = new RegExp(`\\{\\{${m}\\}\\}`, 'g');
+      return (row.before.match(re) || []).length > 0 && (row.after.match(re) || []).length === 0;
+    });
+    if (dropped.length) {
+      warnings.push(`No ${dropped.map((m) => `{{${m}}}`).join(' or ')} left — the original used it.`);
+    }
+    if (!row.after.trim() && row.before.trim()) warnings.push('This field is now empty.');
+    els.modalBody.querySelector(`[data-warn="${i}"]`).innerHTML = warnings
+      .map((w) => `<div class="editor-warning">⚠ ${escapeHtml(w)}</div>`)
+      .join('');
+    els.modalBody.querySelector(`[data-row="${i}"]`).classList.toggle('is-changed', row.after !== row.before);
+  }
+
+  rows.forEach((_, i) => {
+    refreshRow(i);
+    els.modalBody.querySelector(`[data-text="${i}"]`).addEventListener('input', () => refreshRow(i));
+    els.modalBody.querySelector(`[data-revert="${i}"]`).addEventListener('click', () => {
+      els.modalBody.querySelector(`[data-text="${i}"]`).value = editor.rows[i].before;
+      refreshRow(i);
+    });
+  });
+
+  els.modalBody.querySelector('[data-cancel]').addEventListener('click', () => openCard(id));
+  for (const btn of els.modalBody.querySelectorAll('[data-save]')) {
+    btn.addEventListener('click', () => saveEditor(btn.dataset.save));
+  }
+}
+
+async function saveEditor(mode) {
+  const msg = els.modalBody.querySelector('#editorMsg');
+  const changed = {};
+  for (const row of editor.rows) {
+    if (row.after !== row.before) changed[row.field] = row.after;
+  }
+  if (!Object.keys(changed).length) {
+    msg.textContent = 'Nothing has changed yet — edit something, or Cancel.';
+    return;
+  }
+  if (mode === 'replace' && !confirm(
+    `Overwrite "${editor.name}" with this version?\n\n` +
+    `${Object.keys(changed).length} field(s) change. A copy of the current file is kept in Trash, so this is undoable.`,
+  )) return;
+
+  const rescore = els.modalBody.querySelector('#editorRescore').checked;
+  for (const b of els.modalBody.querySelectorAll('[data-save]')) b.disabled = true;
+  msg.textContent = rescore ? 'Saving and scoring…' : 'Saving…';
+
+  try {
+    const res = await api(`/api/cards/${encodeURIComponent(editor.id)}/save`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fields: changed, mode, rescore }),
+    });
+    await loadCards();
+
+    const now = res.entry?.result?.overall_score;
+    const was = res.previousScore;
+    let verdict = '';
+    if (now != null && was != null) {
+      const diff = Math.round((now - was) * 10) / 10;
+      verdict = diff > 0 ? `${was} → ${now} / 10  (+${diff})` : diff < 0 ? `${was} → ${now} / 10  (${diff})` : `still ${now} / 10`;
+    } else if (now != null) {
+      verdict = `${now} / 10`;
+    }
+    const lines = [
+      mode === 'new' ? `Saved as a new card: ${res.file}` : `Replaced ${res.file}`,
+      verdict ? `Score: ${verdict}` : 'Saved — not scored yet.',
+    ];
+    if (res.entry?.scoreError) lines.push(`(Saved fine, but scoring it failed: ${res.entry.scoreError})`);
+    if (res.backedUpAs) lines.push(`The previous version is in Trash as: ${res.backedUpAs}`);
+    alert(lines.join('\n\n'));
+    await openCard(res.file);
+  } catch (err) {
+    msg.textContent = `Could not save: ${err.message}`;
+    for (const b of els.modalBody.querySelectorAll('[data-save]')) b.disabled = false;
+  }
+}
+
+async function startImprove(id, name) {
+  els.modalBody.innerHTML = `<h2>${escapeHtml(name)}</h2>
+    <p class="editor-working">Asking the model to rewrite the weak fields…</p>
+    <p class="folder-hint">This is one request and takes about as long as scoring a card. Nothing is saved
+    until you review it.</p>`;
+  try {
+    const data = await api(`/api/cards/${encodeURIComponent(id)}/improve`, { method: 'POST' });
+    editor = {
+      id,
+      name: data.name,
+      source: 'improve',
+      headline: data.headline,
+      previousScore: data.previousScore,
+      rows: rowsFromProposal(data),
+    };
+    renderEditor();
+  } catch (err) {
+    els.modalBody.innerHTML = `<h2>${escapeHtml(name)}</h2>
+      <p style="color:var(--red)">Could not improve this card: ${escapeHtml(err.message)}</p>`;
+    const back = document.createElement('button');
+    back.textContent = 'Back to the card';
+    back.addEventListener('click', () => openCard(id));
+    els.modalBody.appendChild(back);
+  }
+}
+
+function startManualEdit(id, name, fields) {
+  editor = { id, name, source: 'manual', headline: '', previousScore: null, rows: rowsFromCard(fields) };
+  renderEditor();
+}
 
 els.modalClose.addEventListener('click', closeModal);
 els.modalBackdrop.addEventListener('click', (e) => {
