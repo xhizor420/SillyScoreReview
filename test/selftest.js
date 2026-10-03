@@ -1350,7 +1350,11 @@ async function testEditablePrompts() {
   assert.ok(P.validateInstructions('full', 'x'.repeat(P.MAX_INSTRUCTIONS_CHARS + 1)).length > 0, 'runaway length is refused');
   assert.ok(P.adviseInstructions('full', 'Reply as {"fields": ...}').length > 0, 'describing JSON yourself earns a warning');
   assert.ok(P.adviseInstructions('fast', 'Also explain the weaknesses.').length > 0, 'asking fast mode for prose earns a warning');
-  console.log('✓ empty or runaway instructions are refused; conflicting ones get a warning');
+  const lenient = (t) => P.adviseInstructions('fast', t).some((a) => /Lenient/.test(a));
+  assert.equal(lenient(P.PROMPT_KINDS.fast.defaultInstructions), false, 'the built-in strict prompt must not be flagged as lenient');
+  assert.equal(lenient('Do not be generous.'), false);
+  assert.equal(lenient('Be generous with scores.'), true);
+  console.log('✓ empty or runaway instructions are refused; conflicting ones get a warning (and "do not be generous" is not lenient)');
 
   // The parser keeps working whatever the instructions say.
   const seen = [];

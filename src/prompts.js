@@ -182,7 +182,10 @@ export function adviseInstructions(kind, text) {
   if (kind === 'fast' && /strength|weakness|suggestion|summary|explain/i.test(text)) {
     notes.push('Fast scoring never returns written feedback, so instructions about strengths, weaknesses or summaries will be ignored (and only slow it down).');
   }
-  if (kind !== 'improve' && /\b(lenient|generous|be kind|go easy)\b/i.test(text)) {
+  // "Do not be generous" is the opposite of lenient — only flag the word when
+  // it is not negated, or the built-in strict prompt warns about itself.
+  const leniency = /\b(?<!(?:not|never|n't)\s+(?:be\s+)?)(lenient|generous|be kind|go easy)\b/i;
+  if (kind !== 'improve' && leniency.test(text)) {
     notes.push('Lenient grading compresses scores toward the top, which makes it harder to tell which cards to delete.');
   }
   if (text.length > 6000) {
