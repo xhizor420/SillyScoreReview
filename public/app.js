@@ -31,6 +31,10 @@ const els = {
   scanStats: document.getElementById('scanStats'),
   hideScanPanelBtn: document.getElementById('hideScanPanelBtn'),
   stopScanBtn: document.getElementById('stopScanBtn'),
+  scanBanner: document.getElementById('scanBanner'),
+  scanBannerText: document.getElementById('scanBannerText'),
+  resumeScanBtn: document.getElementById('resumeScanBtn'),
+  bannerSettingsBtn: document.getElementById('bannerSettingsBtn'),
   backupList: document.getElementById('backupList'),
   scanActive: document.getElementById('scanActive'),
   scanRecent: document.getElementById('scanRecent'),
@@ -259,7 +263,12 @@ async function api(url, options = {}) {
     }
   }
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `Request failed: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(json.error || `Request failed: ${res.status}`);
+    err.status = res.status;
+    err.body = json;
+    throw err;
+  }
   return json;
 }
 
@@ -681,7 +690,45 @@ function fmtDuration(ms) {
   return `${(m / 60).toFixed(1)}h`;
 }
 
+/**
+ * The scan's own account of anything unusual: paused on a fatal error, waiting
+ * out an outage, slowed down by the provider, or on its automatic retry pass.
+ * Each says what happened and what (if anything) you need to do.
+ */
+function renderScanBanner(job) {
+  let html = '';
+  let tone = 'info';
+  let showResume = false;
+  let showSettings = false;
+
+  if (job.status === 'running' && job.state === 'paused') {
+    tone = 'bad';
+    showResume = true;
+    showSettings = job.pauseKind === 'auth' || job.pauseKind === 'model';
+    const title = { auth: 'Paused — API key rejected', credits: 'Paused — out of credits', model: 'Paused — model not found' }[job.pauseKind] || 'Paused';
+    html = `<b>${escapeHtml(title)}.</b> ${escapeHtml(job.pauseReason || '')}`;
+  } else if (job.status === 'running' && job.state === 'waiting') {
+    tone = 'warn';
+    const nextIn = job.nextProbeInMs != null ? ` Checking again in ${Math.ceil(job.nextProbeInMs / 1000)}s.` : '';
+    html = `<b>Can't reach the provider</b> (for ${fmtDuration(job.waitingForMs)}). The scan is waiting instead of failing cards, and will carry on by itself as soon as the connection is back.${nextIn} Nothing is lost.`;
+  } else if (job.status === 'running' && job.phase === 'retrying') {
+    html = `<b>Retry pass:</b> trying the ${job.retryTotal} card${job.retryTotal === 1 ? '' : 's'} that failed for temporary reasons (slow answer, cut-off reply, provider hiccup) once more${job.recovered ? ` — ${job.recovered} recovered so far` : ''}.`;
+  } else if (job.status === 'running' && job.pacing?.slowedDown) {
+    tone = 'warn';
+    html = `<b>Slowed down:</b> the provider answered "too many requests", so the scan is pacing itself at ${job.pacing.currentRpm}/min instead of ${job.pacing.ceilingRpm}/min. It speeds back up on its own once things are quiet.`;
+  } else if (job.status !== 'running' && job.recovered) {
+    html = `The automatic retry pass recovered <b>${job.recovered}</b> card${job.recovered === 1 ? '' : 's'} that failed the first time.`;
+  }
+
+  els.scanBanner.classList.toggle('hidden', !html);
+  els.scanBanner.className = `scan-banner tone-${tone}${html ? '' : ' hidden'}`;
+  els.scanBannerText.innerHTML = html;
+  els.resumeScanBtn.classList.toggle('hidden', !showResume);
+  els.bannerSettingsBtn.classList.toggle('hidden', !showSettings);
+}
+
 function renderScanPanel(job) {
+  renderScanBanner(job);
   const finished = job.done + job.errors;
   const pct = job.total ? Math.round((finished / job.total) * 100) : 100;
   els.progressFill.style.width = `${pct}%`;
@@ -698,7 +745,8 @@ function renderScanPanel(job) {
     { label: 'In flight', value: `${job.inFlight}/${job.concurrency}` },
     { label: 'Rate', value: job.perHour != null ? `${Math.round(job.perHour)}/hr` : '…' },
     { label: 'Median', value: fmtDuration(job.medianLatencyMs) },
-    { label: 'ETA', value: job.stopping ? 'stopping' : job.status === 'running' ? fmtDuration(job.etaMs) : job.status === 'stopped' ? 'stopped' : 'done' },
+    { label: 'ETA', value: job.stopping ? 'stopping' : job.state === 'paused' ? 'paused' : job.state === 'waiting' ? 'waiting' : job.status === 'running' ? fmtDuration(job.etaMs) : job.status === 'stopped' ? 'stopped' : 'done' },
+    ...(job.pacing?.enabled ? [{ label: 'Pace', value: `${job.pacing.currentRpm}/min`, cls: job.pacing.slowedDown ? 'is-error' : '' }] : []),
     { label: 'Elapsed', value: fmtDuration(job.elapsedMs) },
     { label: 'Mode', value: job.detail === 'fast' ? 'fast' : 'full' },
   ];
@@ -799,11 +847,25 @@ async function pollJob(jobId) {
 }
 
 async function startBatch(body) {
-  const { jobId } = await api('/api/score/batch', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let jobId;
+  try {
+    ({ jobId } = await api('/api/score/batch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  } catch (err) {
+    // Only one scan runs at a time (two would together exceed the provider's
+    // rate limit). If one is already going — from this tab before a reload, or
+    // from your phone — show that one.
+    if (err.status === 409 && err.body?.jobId) {
+      if (currentJobId === err.body.jobId) return;
+      alert('A scan is already running (perhaps started from another device). Showing it here.');
+      await pollJob(err.body.jobId);
+      return;
+    }
+    throw err;
+  }
   await pollJob(jobId);
 }
 
@@ -892,6 +954,19 @@ els.clearSelectionBtn.addEventListener('click', () => {
 // The point of the filters is to isolate a group (e.g. "Score below 4") and act
 // on all of it at once — ticking several hundred checkboxes by hand is not a
 // workflow. This selects/deselects exactly what the current filter+search shows.
+els.resumeScanBtn.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  els.resumeScanBtn.disabled = true;
+  try {
+    await api(`/api/score/batch/${currentJobId}/resume`, { method: 'POST' });
+  } catch (err) {
+    alert(`Could not resume: ${err.message}`);
+  } finally {
+    els.resumeScanBtn.disabled = false;
+  }
+});
+els.bannerSettingsBtn.addEventListener('click', () => openSettings());
+
 els.stopScanBtn.addEventListener('click', async () => {
   if (!currentJobId) return;
   els.stopScanBtn.disabled = true;
@@ -1456,7 +1531,19 @@ els.modalBackdrop.addEventListener('click', (e) => {
   if (e.target === els.modalBackdrop) closeModal();
 });
 
-loadCards().catch(async (err) => {
+// A scan runs on the server, not in this tab — reloading the page, or opening
+// the dashboard on another device, should show the scan that is already going
+// rather than leave you guessing (or tempt you into starting a second one).
+async function reattachToRunningScan() {
+  try {
+    const { jobId } = await api('/api/score/active');
+    if (jobId && jobId !== currentJobId) await pollJob(jobId);
+  } catch {
+    // no scan endpoint reachable yet — nothing to attach to
+  }
+}
+
+loadCards().then(reattachToRunningScan).catch(async (err) => {
   // Most likely first run: no charactersDir picked yet. Guide straight to the folder picker.
   els.emptyState.textContent = `Couldn't read the characters folder yet (${err.message}). Use "Change folder" below to pick it.`;
   els.emptyState.classList.remove('hidden');

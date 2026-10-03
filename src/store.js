@@ -142,3 +142,30 @@ export class Store {
     await rename(tmp, this.filePath);
   }
 }
+
+const exitStores = new Set();
+let exitHooked = false;
+
+/**
+ * Makes sure batched writes reach disk when the process is told to stop —
+ * Ctrl+C (SIGINT), the console window being closed (SIGHUP, which is what
+ * Windows sends), or a service stop (SIGTERM). Without this, the last second
+ * or so of results still waiting in the write batch would be lost whenever
+ * you close the dashboard window mid-scan.
+ */
+export function flushOnExit(store) {
+  exitStores.add(store);
+  if (exitHooked) return;
+  exitHooked = true;
+  const finish = (signal) => {
+    Promise.allSettled([...exitStores].map((st) => st.flush()))
+      .finally(() => process.exit(signal === 'SIGINT' ? 130 : 0));
+  };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    try {
+      process.once(signal, () => finish(signal));
+    } catch {
+      // not every signal exists on every platform
+    }
+  }
+}

@@ -8,13 +8,14 @@ import net from 'node:net';
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, resolveConcurrency } from './llmClient.js';
 import { scoreCard, DEFAULT_WEIGHTS } from './scorer.js';
-import { Store } from './store.js';
-import { runPool } from './concurrency.js';
+import { Store, flushOnExit } from './store.js';
+import { runQueue } from './concurrency.js';
 import { classifyError } from './errorKinds.js';
 import { resolveCacheFile, listCaches } from './cachePath.js';
 import { mergeCaches } from './mergeCaches.js';
 import { importScores } from './importScores.js';
 import { snapshotCache, listBackups, restoreBackup, backupDirFor } from './backup.js';
+import { fatalReason, isConnectivityError } from './errorKinds.js';
 
 const DEFAULT_CONFIG = {
   charactersDir: './characters',
@@ -180,36 +181,109 @@ async function cmdScan(args) {
     return `[${finished}/${work.length} · ${perHour.toFixed(0)}/hr · ETA ${eta}]`;
   };
 
-  await runPool(work, concurrency, async ({ file, card, hash }) => {
+  // Closing the window or pressing Ctrl+C mid-scan must not drop the last
+  // results still waiting in the write batch.
+  flushOnExit(store);
+
+  // The same run-level supervision as the dashboard: a rejected key or empty
+  // balance stops sending (every remaining card would fail identically), and a
+  // lost connection waits for the provider to come back instead of failing
+  // cards. Neither is recorded against any card.
+  let stopReason = null;
+  let gatePromise = null;
+  let release = null;
+  let connStreak = 0;
+  const outageRequeues = new Map();
+  const waitForConnection = () => {
+    if (gatePromise) return;
+    gatePromise = new Promise((r) => { release = r; });
+    console.log(`\n⏸  Can't reach ${provider.name}. Waiting for the connection to come back — nothing is being marked failed.`);
+    (async () => {
+      let delay = config.outageProbeMs ?? 5000;
+      for (;;) {
+        await new Promise((r) => setTimeout(r, delay));
+        const probe = provider.probe ? await provider.probe() : { reachable: true };
+        if (probe.reachable) break;
+        delay = Math.min(30_000, Math.round(delay * 1.5));
+        console.log(`   still unreachable — checking again in ${Math.round(delay / 1000)}s`);
+      }
+      console.log('▶  Connection is back. Carrying on.\n');
+      connStreak = 0;
+      const r = release;
+      gatePromise = null;
+      release = null;
+      r();
+    })();
+  };
+
+  await runQueue(work, concurrency, async (item, { requeue }) => {
+    if (stopReason) return;
+    const { file, card, hash } = item;
     try {
       const result = await scoreCard(card, provider, { weights: config.weights, detail: config.scoreDetail });
-      await store.set(file, {
+      // Not awaited per card: on a big cache that would park each worker for a
+      // whole write-batch window. The run flushes once at the end.
+      store.set(file, {
         hash,
         name: card.name,
         tokenEstimate: totalCardTokens(card),
         scoredAt: new Date().toISOString(),
         provider: provider.name,
         model: provider.model,
+        detail: config.scoreDetail,
         result,
         error: null,
       });
+      connStreak = 0;
       done++;
       console.log(`${progress()} ✓ ${card.name} — overall ${result.overall_score}/10  (${file})`);
     } catch (err) {
+      const fatal = fatalReason(err);
+      if (fatal) {
+        if (!stopReason) {
+          stopReason = fatal.message;
+          console.error(`\n✋ Stopping: ${fatal.message.replace(/press Resume/, 'run scan again')}`);
+        }
+        return;
+      }
+      if (isConnectivityError(err)) {
+        const n = (outageRequeues.get(file) || 0) + 1;
+        outageRequeues.set(file, n);
+        if (n <= 3) {
+          requeue(item);
+          if (++connStreak >= 2) waitForConnection();
+          return;
+        }
+      } else {
+        connStreak = 0;
+      }
       errors++;
-      await store.set(file, {
-        hash,
-        name: card.name,
-        tokenEstimate: totalCardTokens(card),
-        scoredAt: new Date().toISOString(),
-        provider: provider.name,
-        model: provider.model,
-        result: null,
-        error: err.message,
-      });
+      // A failed rescore keeps the score the card already had.
+      const previous = store.get(file);
+      if (previous?.result && previous.hash === hash) {
+        store.set(file, { ...previous, lastError: err.message, lastErrorAt: new Date().toISOString() });
+      } else {
+        store.set(file, {
+          hash,
+          name: card.name,
+          tokenEstimate: totalCardTokens(card),
+          scoredAt: new Date().toISOString(),
+          provider: provider.name,
+          model: provider.model,
+          result: null,
+          error: err.message,
+        });
+      }
       console.error(`${progress()} ✗ ${card.name} — ${err.message}  (${file})`);
     }
-  });
+  }, { gate: () => gatePromise });
+
+  await store.flush();
+  if (stopReason) {
+    console.log(`\nStopped early: ${done} scored this run. Nothing after the problem was marked failed —`);
+    console.log('fix it and run scan again; it picks up exactly where this stopped.');
+    return;
+  }
 
   const totalMin = (Date.now() - runStartedAt) / 60_000;
   console.log(`\nDone in ${totalMin < 60 ? `${totalMin.toFixed(1)} min` : `${(totalMin / 60).toFixed(1)} h`}. ${done} scored, ${errors} errors. Re-run scan to retry errors.`);

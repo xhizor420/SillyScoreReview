@@ -193,6 +193,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .dupe-link { cursor: pointer; font-family: inherit; }
 .dupe-link:hover { filter: brightness(1.35); text-decoration: underline; }
 
+.scan-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 10px; padding: 10px 12px; border-radius: 6px; font-size: 13px; line-height: 1.45;
+  background: rgba(124,156,255,0.10); border: 1px solid var(--accent);
+}
+.scan-banner.tone-warn { background: rgba(224,178,58,0.12); border-color: var(--yellow); }
+.scan-banner.tone-bad { background: rgba(229,88,107,0.12); border-color: var(--red); }
+.scan-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
+@media (max-width: 760px) {
+  .scan-banner-actions { width: 100%; }
+  .scan-banner-actions button { flex: 1; min-height: 42px; }
+}
+
 .grid-more {
   display: block; width: calc(100% - 40px); margin: 0 20px 20px;
   padding: 12px; font-size: 13px;

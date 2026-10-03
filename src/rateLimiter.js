@@ -25,11 +25,67 @@ export class RateLimiter {
   constructor({ requestsPerMinute } = {}) {
     this.enabled = Boolean(requestsPerMinute && requestsPerMinute > 0);
     this.requestsPerMinute = this.enabled ? requestsPerMinute : null;
+    // The configured/documented ceiling never moves. `currentRpm` is what we
+    // actually pace at, and drops below the ceiling when the provider pushes
+    // back — see penalize()/reward().
+    this.ceilingRpm = this.requestsPerMinute;
+    this.currentRpm = this.requestsPerMinute;
     this.minIntervalMs = this.enabled ? 60_000 / requestsPerMinute : 0;
     this.nextSlotMs = 0;
     this.chain = Promise.resolve(); // serializes waiters so they proceed in order
     this.throttledCount = 0;
     this.totalWaitedMs = 0;
+    this.penalties = 0;
+    this.lastPenaltyMs = 0;
+    this.successesSincePenalty = 0;
+  }
+
+  /**
+   * The provider answered 429: we are too fast for it right now, whatever its
+   * published numbers say (shared IPs, a busy upstream model, a tightened
+   * limit). Halve the pace for everyone sharing this limiter, and honour any
+   * Retry-After by holding the next slot back that long.
+   *
+   * Several workers usually hit the same 429 burst at once, so penalties within
+   * two seconds of each other count as one — otherwise one burst would slam the
+   * rate straight to the floor.
+   */
+  penalize(retryAfterMs = null) {
+    const now = Date.now();
+    if (!this.enabled) {
+      // No published limit to pace against, but the API has just told us one
+      // exists. Assume 60/min as the ceiling; the halving below then starts
+      // us at 30/min, and reward() climbs back toward 60 once it is quiet.
+      this.enabled = true;
+      this.ceilingRpm = 60;
+      this.currentRpm = 60;
+      this.requestsPerMinute = 60;
+    }
+    if (retryAfterMs != null && retryAfterMs > 0 && retryAfterMs <= 30_000) {
+      this.nextSlotMs = Math.max(this.nextSlotMs, now + retryAfterMs);
+    }
+    this.successesSincePenalty = 0;
+    if (now - this.lastPenaltyMs < 2000) return;
+    this.lastPenaltyMs = now;
+    this.penalties++;
+    const floor = Math.max(2, this.ceilingRpm / 16);
+    this.currentRpm = Math.max(floor, this.currentRpm / 2);
+    this.minIntervalMs = 60_000 / this.currentRpm;
+  }
+
+  /**
+   * A request went through. After a quiet spell, creep back toward the ceiling
+   * — 10% of it per 10 clean requests — so one bad minute does not leave a
+   * whole overnight scan crawling at a fraction of its allowance. Never exceeds
+   * the ceiling.
+   */
+  reward() {
+    if (!this.enabled || this.currentRpm >= this.ceilingRpm) return;
+    this.successesSincePenalty++;
+    if (Date.now() - this.lastPenaltyMs < 20_000) return;
+    if (this.successesSincePenalty % 10 !== 0) return;
+    this.currentRpm = Math.min(this.ceilingRpm, this.currentRpm + this.ceilingRpm * 0.1);
+    this.minIntervalMs = 60_000 / this.currentRpm;
   }
 
   /** Resolves once it is this caller's turn, in arrival order. */
@@ -59,6 +115,10 @@ export class RateLimiter {
     return {
       enabled: this.enabled,
       requestsPerMinute: this.requestsPerMinute,
+      ceilingRpm: this.ceilingRpm,
+      currentRpm: this.currentRpm == null ? null : Math.round(this.currentRpm),
+      slowedDown: Boolean(this.enabled && this.currentRpm < this.ceilingRpm),
+      penalties: this.penalties,
       minIntervalMs: this.minIntervalMs,
       throttledCount: this.throttledCount,
       totalWaitedMs: this.totalWaitedMs,

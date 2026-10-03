@@ -1,4 +1,5 @@
 import { RateLimiter } from './rateLimiter.js';
+import { fatalReason } from './errorKinds.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -127,12 +128,29 @@ function createAnthropicProvider(config) {
   if (!apiKey) throw new Error('Anthropic provider selected but no API key set (config.apiKey or ANTHROPIC_API_KEY)');
   const model = config.model || 'claude-sonnet-5';
   const baseURL = config.baseURL || 'https://api.anthropic.com';
+  // No published per-minute number to pace against by default, but the limiter
+  // still matters: it is what slows down when the API starts answering 429.
+  const limiter = new RateLimiter({ requestsPerMinute: config.requestsPerMinute ?? 0 });
+
+  async function probe() {
+    try {
+      const res = await fetchWithTimeout(`${baseURL}/v1/models`, {
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      }, 10_000);
+      return { reachable: res.status < 500, status: res.status };
+    } catch (err) {
+      return { reachable: false, error: err.message };
+    }
+  }
 
   return {
     name: 'anthropic',
     model,
+    limiter,
+    probe,
     async chat({ system, user, maxTokens }) {
       return withRetries(async ({ timeoutMultiplier = 1 } = {}) => {
+        await limiter.acquire();
         const res = await fetchWithTimeout(
           `${baseURL}/v1/messages`,
           {
@@ -154,13 +172,17 @@ function createAnthropicProvider(config) {
         if (!res.ok) {
           const body = await res.text().catch(() => '');
           const err = new Error(`Anthropic API ${res.status}: ${body.slice(0, 500)}`);
-          err.retriable = res.status === 429 || res.status >= 500;
+          err.status = res.status;
+          err.body = body.slice(0, 2000);
+          err.retriable = (res.status === 429 || res.status >= 500) && !fatalReason(err);
           err.retryAfterMs = parseRetryAfterMs(res);
+          if (res.status === 429) limiter.penalize(err.retryAfterMs);
           throw err;
         }
+        limiter.reward();
         const json = await res.json();
         return json.content?.map((c) => c.text || '').join('') || '';
-      });
+      }, { baseDelayMs: config.retryBaseDelayMs ?? 1500 });
     },
   };
 }
@@ -210,10 +232,18 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         const err = new Error(`${name} API ${res.status}: ${body.slice(0, 500)}`);
-        err.retriable = res.status === 429 || res.status >= 500;
+        err.status = res.status;
+        err.body = body.slice(0, 2000);
+        // A rejected key or an empty balance will be rejected identically on
+        // every retry — retrying only adds rejected requests to the account.
+        err.retriable = (res.status === 429 || res.status >= 500) && !fatalReason(err);
         err.retryAfterMs = parseRetryAfterMs(res);
+        // The provider is telling us we are too fast, even if we are inside
+        // its published numbers. Believe it, for everyone sharing this limiter.
+        if (res.status === 429) limiter.penalize(err.retryAfterMs);
         throw err;
       }
+      limiter.reward();
       const json = await res.json();
       return {
         content: json.choices?.[0]?.message?.content || '',
@@ -221,7 +251,22 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
         usage: json.usage ?? null,
         latencyMs: Date.now() - startedAt,
       };
-    });
+    }, { baseDelayMs: config.retryBaseDelayMs ?? 1500 });
+  }
+
+  /**
+   * Is the provider reachable at all? Lists models — no tokens, no cost — so
+   * an outage can be watched for recovery without spending anything. Any HTTP
+   * answer below 500 means the network path works (an auth problem will then
+   * surface as a proper fatal error on the next real request).
+   */
+  async function probe() {
+    try {
+      const res = await fetchWithTimeout(`${baseURL}/models`, { headers: { authorization: `Bearer ${apiKey}` } }, 10_000);
+      return { reachable: res.status < 500, status: res.status };
+    } catch (err) {
+      return { reachable: false, error: err.message };
+    }
   }
 
   return {
@@ -229,6 +274,7 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
     model,
     baseURL,
     limiter,
+    probe,
     async chat(args) {
       return (await call(args)).content;
     },

@@ -29,7 +29,7 @@ environment).
 4. Run `node src/cli.js scan --config <path>` for real and read its stdout —
    that's the actual user-facing surface, same code path the dashboard's
    "Scan unscored" batch job uses (`server.js` calls the same
-   `scoreCard`/`Store`/`runPool`).
+   `scoreCard`/`Store`/`runQueue`).
 5. Track request counts/timestamps/max-concurrency in the fake server (log to
    stdout or a SIGTERM handler) to get hard numbers, not impressions.
 

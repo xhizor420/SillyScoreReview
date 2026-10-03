@@ -10,10 +10,10 @@ import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from
 import { scoreCard } from './scorer.js';
 import { improveCard } from './improver.js';
 import { serializeCard } from './cardWriter.js';
-import { Store } from './store.js';
-import { runPool } from './concurrency.js';
+import { Store, flushOnExit } from './store.js';
+import { runQueue } from './concurrency.js';
 import { resolveCacheFile } from './cachePath.js';
-import { classifyError } from './errorKinds.js';
+import { classifyError, isRunLevelError, fatalReason, isConnectivityError } from './errorKinds.js';
 import { snapshotCache, listBackups } from './backup.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +31,7 @@ function safeJoin(dir, name) {
 export async function startServer(config) {
   await mkdir(config.trashDir, { recursive: true });
   const jobs = new Map();
+  const controls = new Map(); // jobId -> { openGate, resume } for a live scan
 
   // A scan/browse against one folder shouldn't see cached scores that
   // belong to a same-named file in a folder you switched away from, so
@@ -47,8 +48,30 @@ export async function startServer(config) {
       await snapshotCache(file, { reason: 'startup' });
       store = await new Store(file, key).load();
       stores.set(key, store);
+      // Closing the dashboard window is how most people stop it — make sure
+      // that never drops results still waiting in the write batch.
+      flushOnExit(store);
     }
     return store;
+  }
+
+  // One provider — and so one rate limiter — for the whole server. Each
+  // createProvider() gets its own limiter, so a scan, a rescore from the card
+  // popup and an "Improve" running at once used to each pace independently and
+  // could together exceed the provider's published limit. Rebuilt only when a
+  // setting that affects requests changes.
+  let sharedProvider = null;
+  let sharedSignature = null;
+  function getProvider() {
+    const signature = JSON.stringify([
+      config.provider, config.baseURL, config.apiKey, config.model, config.requestsPerMinute,
+      config.burst, config.timeoutMs, config.maxTokens, config.temperature,
+    ]);
+    if (!sharedProvider || signature !== sharedSignature) {
+      sharedProvider = createProvider(config);
+      sharedSignature = signature;
+    }
+    return sharedProvider;
   }
 
   function cardSummary(file, entry) {
@@ -126,6 +149,21 @@ export async function startServer(config) {
       store.set(file, entry);
       return entry;
     } catch (err) {
+      // A run-level problem (API key rejected, out of credits, network down) is
+      // not this card's fault and says nothing about it — record nothing, so
+      // the card is exactly as it was and simply gets picked up again.
+      if (isRunLevelError(err)) throw err;
+
+      // A failed *re*score must never destroy the score it was replacing. It
+      // used to: the error entry overwrote the result, so a "Rescore all" with
+      // an expired key, or a rescore that timed out, wiped good scores.
+      // Keep the existing result and note the failed attempt beside it.
+      const previous = store.get(file);
+      if (previous?.result && previous.hash === hash) {
+        store.set(file, { ...previous, lastError: err.message, lastErrorAt: new Date().toISOString() });
+        throw err;
+      }
+
       const entry = {
         hash,
         name: card.name,
@@ -136,7 +174,7 @@ export async function startServer(config) {
         result: null,
         error: err.message,
       };
-      await store.set(file, entry);
+      store.set(file, entry);
       throw err;
     }
   }
@@ -209,7 +247,7 @@ export async function startServer(config) {
   app.post('/api/cards/:id/score', async (req, res) => {
     try {
       const store = await getStore(config.charactersDir);
-      const provider = createProvider(config);
+      const provider = getProvider();
       const detail = req.body?.detail === 'full' || req.body?.detail === 'fast' ? req.body.detail : undefined;
       const entry = await scoreOne(req.params.id, provider, store, detail ?? (config.scoreDetail || 'full'));
       await store.flush(); // a single card is an interactive action — make it durable before replying
@@ -229,7 +267,7 @@ export async function startServer(config) {
       const store = await getStore(config.charactersDir);
       const { card } = await readCardOrThrow(file);
       const entry = store.get(file);
-      const provider = createProvider(config);
+      const provider = getProvider();
       const fields = Array.isArray(req.body?.fields) && req.body.fields.length ? req.body.fields : null;
       const proposal = await improveCard(card, entry?.result, provider, { fields });
       const before = {};
@@ -317,7 +355,7 @@ export async function startServer(config) {
       let entry = store.get(targetFile);
       if (rescore) {
         try {
-          const scored = await scoreOne(targetFile, createProvider(config), store);
+          const scored = await scoreOne(targetFile, getProvider(), store);
           entry = { ...scored, previousScore, improvedFrom: mode === 'new' ? file : null };
           await store.set(targetFile, entry);
         } catch (err) {
@@ -332,7 +370,43 @@ export async function startServer(config) {
     }
   });
 
+  /**
+   * Records a failure against a card when the scorer itself could not (a card
+   * that kept failing to connect while others got through). Like scoreOne, it
+   * never throws away a score the card already had.
+   */
+  function markFailed(store, file, err) {
+    const previous = store.get(file);
+    if (previous?.result) {
+      store.set(file, { ...previous, lastError: err.message, lastErrorAt: new Date().toISOString() });
+    } else {
+      store.set(file, { ...(previous || {}), name: previous?.name || file, result: null, error: err.message, scoredAt: new Date().toISOString() });
+    }
+  }
+
+  /** The scan currently in progress (running, paused or waiting), if any. */
+  function activeJob() {
+    return [...jobs.values()].find((j) => j.status === 'running') || null;
+  }
+
+  app.get('/api/score/active', (req, res) => {
+    const job = activeJob();
+    res.json({ jobId: job?.id ?? null });
+  });
+
   app.post('/api/score/batch', async (req, res) => {
+    // One scan at a time. Two at once — the dashboard open on a phone and a PC,
+    // or a reload and "Scan unscored" again — would each pace themselves to the
+    // provider's limit and together send double it. Hand back the running scan
+    // so the caller can attach to it instead.
+    const running = activeJob();
+    if (running) {
+      return res.status(409).json({
+        error: 'A scan is already running. Showing that one instead of starting a second.',
+        jobId: running.id,
+        total: running.total,
+      });
+    }
     const { ids, scope = 'selected', limit, rescore = false } = req.body || {};
     const detail = req.body?.detail === 'full' || req.body?.detail === 'fast'
       ? req.body.detail
@@ -388,6 +462,17 @@ export async function startServer(config) {
       inFlight: 0,
       skipped: 0,       // cards never started because the scan was stopped
       cancelRequested: false,
+      // Run-level supervision (see the runner below):
+      state: 'running', // running | paused (fatal: key/credits/model) | waiting (outage)
+      pauseKind: null,
+      pauseReason: null,
+      waitingSince: null,
+      nextProbeAt: null,
+      outages: 0,
+      connStreak: 0,
+      phase: 'main',    // main | retrying (the automatic second pass)
+      retryTotal: 0,
+      recovered: 0,
       active: [],       // cards currently awaiting a response, with elapsed time
       recent: [],       // rolling feed of the last few completions
       latencies: [],    // per-card wall time, for a live median
@@ -398,13 +483,90 @@ export async function startServer(config) {
     (async () => {
       let provider;
       try {
-        provider = createProvider(config);
+        provider = getProvider();
       } catch (err) {
         job.status = 'error';
         job.fatalError = err.message;
         return;
       }
-      await runPool(files, job.concurrency, async (file) => {
+
+      // --- the gate: closed while paused or waiting, so nothing is sent ---
+      let gatePromise = null;
+      let release = null;
+      const closeGate = () => {
+        if (!gatePromise) gatePromise = new Promise((r) => { release = r; });
+      };
+      const openGate = () => {
+        if (release) release();
+        gatePromise = null;
+        release = null;
+      };
+      const gate = () => gatePromise;
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const probeBaseMs = config.outageProbeMs ?? 5000;
+
+      // Every remaining card would fail the same way (rejected key, empty
+      // balance, unknown model). Stop sending, say why, wait for Resume.
+      const pause = (fatal) => {
+        if (job.state === 'paused') return;
+        job.state = 'paused';
+        job.pauseKind = fatal.kind;
+        job.pauseReason = fatal.message;
+        closeGate();
+      };
+
+      // The provider can't be reached. Stop sending, watch for it to come
+      // back with a free request, and carry on by itself when it does.
+      const startWaiting = () => {
+        if (job.state !== 'running') return;
+        job.state = 'waiting';
+        job.waitingSince = Date.now();
+        job.outages++;
+        closeGate();
+        (async () => {
+          let delay = probeBaseMs;
+          while (job.state === 'waiting' && !job.cancelRequested) {
+            job.nextProbeAt = Date.now() + delay;
+            await sleep(delay);
+            if (job.state !== 'waiting' || job.cancelRequested) return;
+            const result = provider.probe ? await provider.probe() : { reachable: true };
+            if (result.reachable) {
+              job.state = 'running';
+              job.waitingSince = null;
+              job.nextProbeAt = null;
+              job.connStreak = 0;
+              openGate();
+              return;
+            }
+            delay = Math.min(30_000, Math.round(delay * 1.5));
+          }
+        })();
+      };
+
+      controls.set(job.id, {
+        openGate,
+        resume: () => {
+          // Settings may have changed (new key, new model) — pick them up.
+          provider = getProvider();
+          job.state = 'running';
+          job.pauseKind = null;
+          job.pauseReason = null;
+          openGate();
+        },
+      });
+
+      const outageRequeues = new Map();   // file -> times handed back because of an outage
+      const retryCandidates = [];         // cards that failed in a way worth one more try
+      const retrying = new Set();         // cards on that second pass
+
+      // Failed for reasons that may well not recur: slow model, cut-off JSON,
+      // a provider hiccup. A card with no text, or a 400, would just fail again.
+      const worthRetrying = (err) =>
+        err.isTimeout || err.status === 429 || err.status >= 500 ||
+        /parseable JSON|did not return/i.test(err.message || '');
+
+      const worker = async (file, { requeue }) => {
         // A 3,000-card scan is a multi-hour commitment. Being able to stop it
         // without killing the server (and losing the scores already written)
         // is not a nicety.
@@ -415,9 +577,12 @@ export async function startServer(config) {
         const startedMs = Date.now();
         job.inFlight++;
         job.active.push({ file, startedMs });
-        const settle = (outcome) => {
+        const leave = () => {
           job.inFlight--;
           job.active = job.active.filter((a) => a.file !== file);
+        };
+        const settle = (outcome) => {
+          leave();
           const tookMs = Date.now() - startedMs;
           job.latencies.push(tookMs);
           if (job.latencies.length > 200) job.latencies.shift();
@@ -426,7 +591,12 @@ export async function startServer(config) {
         };
         try {
           const entry = await scoreOne(file, provider, store, detail);
+          job.connStreak = 0;
           job.done++;
+          if (retrying.has(file)) {
+            job.errors--;
+            job.recovered++;
+          }
           // Checkpoint a long run periodically, so a scan interrupted after
           // hours leaves a snapshot behind and not just a live file.
           // Flush first, or the snapshot would copy a file that is up to one
@@ -441,17 +611,62 @@ export async function startServer(config) {
           if (err.cardDeleted) {
             // You deleted it mid-scan; that is not a failure, just less work.
             job.total = Math.max(0, job.total - 1);
-            job.inFlight--;
-            job.active = job.active.filter((a) => a.file !== file);
+            leave();
             return;
           }
-          job.errors++;
+
+          const fatal = fatalReason(err);
+          if (fatal) {
+            leave();
+            requeue(file); // not this card's fault — it goes back in line untouched
+            pause(fatal);
+            return;
+          }
+
+          if (isConnectivityError(err)) {
+            const n = (outageRequeues.get(file) || 0) + 1;
+            outageRequeues.set(file, n);
+            if (n <= 3) {
+              leave();
+              requeue(file);
+              // The request already retried for ~20s before getting here, so
+              // two cards in a row coming back like this is an outage.
+              if (++job.connStreak >= 2) startWaiting();
+              return;
+            }
+            // The same card failing to connect again and again while others
+            // get through is about that card, not the network.
+            markFailed(store, file, err);
+          } else {
+            job.connStreak = 0;
+          }
+
+          if (!retrying.has(file)) {
+            job.errors++;
+            if (worthRetrying(err)) retryCandidates.push(file);
+          }
           job.results.push({ file, error: err.message });
           settle({ error: err.message });
         }
-      });
+      };
+
+      await runQueue(files, job.concurrency, worker, { gate });
+
+      // One automatic second pass over cards that failed for transient
+      // reasons, so a run ends with as many scores as it can get instead of
+      // asking you to press "Scan unscored" afterwards. Cards that fail twice
+      // stay failed and keep any score they already had.
+      if (!job.cancelRequested && retryCandidates.length) {
+        job.phase = 'retrying';
+        job.retryTotal = retryCandidates.length;
+        for (const f of retryCandidates) retrying.add(f);
+        await runQueue(retryCandidates, job.concurrency, worker, { gate });
+      }
+
+      controls.delete(job.id);
       await store.flush();
       job.status = job.cancelRequested ? 'stopped' : 'done';
+      job.state = 'running';
       job.finishedAt = new Date().toISOString();
     })();
   });
@@ -488,7 +703,31 @@ export async function startServer(config) {
       etaMs: perHour && perHour > 0 ? ((job.total - finished) / perHour) * 3_600_000 : null,
       active: job.active.map((a) => ({ file: a.file, elapsedMs: now - a.startedMs })),
       recent: job.recent,
+      state: job.state,
+      pauseKind: job.pauseKind,
+      pauseReason: job.pauseReason,
+      waitingForMs: job.waitingSince ? now - job.waitingSince : null,
+      nextProbeInMs: job.nextProbeAt ? Math.max(0, job.nextProbeAt - now) : null,
+      outages: job.outages,
+      phase: job.phase,
+      retryTotal: job.retryTotal,
+      recovered: job.recovered,
+      pacing: sharedProvider?.limiter?.stats?.() ?? null,
     });
+  });
+
+  // Carry on after a pause — typically once the API key or balance is fixed
+  // in Settings, which resume() picks up.
+  app.post('/api/score/batch/:jobId/resume', (req, res) => {
+    const job = jobs.get(req.params.jobId);
+    const control = controls.get(req.params.jobId);
+    if (!job || !control) return res.status(404).json({ error: 'No live scan with that id' });
+    try {
+      control.resume();
+    } catch (err) {
+      return res.status(400).json({ error: `Could not resume: ${err.message}` });
+    }
+    res.json({ id: job.id, state: job.state });
   });
 
   // Stops a scan without stopping the server. Cards already scored stay scored
@@ -499,6 +738,10 @@ export async function startServer(config) {
     const job = jobs.get(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Unknown job id' });
     job.cancelRequested = true;
+    // A paused or waiting scan has its workers parked at the gate; let them
+    // through so they see the stop and wind down.
+    job.state = 'running';
+    controls.get(job.id)?.openGate();
     res.json({ id: job.id, status: job.status, inFlight: job.inFlight });
   });
 

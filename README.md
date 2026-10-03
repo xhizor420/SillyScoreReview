@@ -163,6 +163,43 @@ it without killing the server: cards already in flight finish and are saved, car
 hadn't started are left alone, and **Scan unscored** afterwards picks up exactly where it
 left off. Nothing is lost and nothing is scored twice.
 
+## When things go wrong mid-scan
+
+A long scan will hit problems — a slow answer, a dropped connection, an expired key.
+There are two layers handling them.
+
+**Each request** retries on its own:
+
+| what happened | what it does |
+|---|---|
+| no answer within the timeout | retries once with **double** the deadline, so a merely-slow model still gets through |
+| "too many requests" (429) or a provider error (5xx) | waits and retries up to 4 times, using the provider's own `Retry-After` when it sends one |
+| a reply cut off mid-JSON | asks again with more room to finish |
+| key rejected, out of credits | **not** retried — it would only be rejected again |
+
+**The scan as a whole** watches for problems no single retry can fix:
+
+| what happened | what the scan does |
+|---|---|
+| **API key rejected / out of credits / unknown model** | **Pauses** after the first rejection and says which it is. Nothing is marked failed. Fix it in Settings (or top up), press **Resume**, and it carries on from where it stopped. |
+| **Connection lost** (Wi-Fi, Tailscale reconnecting, the PC waking up, the provider down) | **Waits** instead of failing cards, checks for the connection every few seconds with a free request, and carries on **by itself** when it's back. |
+| **The provider keeps saying "too many requests"** | **Slows down** — halves its pace for every request in the app, then creeps back up to your normal rate once things are quiet. Never goes above the limit you set. |
+| **Some cards failed for temporary reasons** | Gets **one automatic retry pass** at the end of the run, so you don't have to press *Scan unscored* again. |
+| **A rescore fails** | **Keeps the score the card already had.** (It used to overwrite it — a "Rescore all" with an expired key wiped every score. Fixed.) |
+| **You press Scan on your phone while one runs on the PC** | Shows the scan that's already running instead of starting a second one, which would double your request rate past NanoGPT's limit. |
+| **You reload the page, or open the dashboard on another device** | Finds the running scan and shows it, paused/waiting state included. |
+
+Measured against a test API that misbehaves on cue:
+
+| | before | now |
+|---|---|---|
+| key revoked partway through 200 cards | 182 more requests sent, **182 cards failed** | 1 request, **0 failed**, paused → Resume → 200/200 |
+| out of credits partway through | same — 182 failed | 1 request, 0 failed, paused → Resume → 200/200 |
+| network down for 25s | 4 cards wrongly marked failed | **0 failed**, waited and resumed by itself |
+| provider rejecting 60% of requests with 429 | kept sending 2.7/s, 5 failed | slowed itself to 0.7/s, **0 failed**, 2 recovered on the retry pass |
+| scan started from two devices at once | **240/min against a 120/min limit** | one scan, 120/min |
+| "Rescore all" with an expired key | **30 of 30 scores destroyed** | 30 of 30 kept |
+
 ## Your scores are backed up automatically
 
 The score file is snapshotted into `data/backups/` when the dashboard opens a folder,
@@ -198,7 +235,8 @@ Score writes are batched too. Saving after every single card meant rewriting the
 9MB score file each time — about 2.5 minutes of blocked work across a full run, which
 also made the dashboard stutter while scanning. Results now coalesce into one write per
 second or so, and every path that ends a run (finishing, stopping, scoring one card from
-the modal) flushes to disk first.
+the modal) flushes to disk first — as does pressing Ctrl+C or closing the dashboard's
+window mid-scan.
 
 ## Using it from your phone
 

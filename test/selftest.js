@@ -429,6 +429,7 @@ async function main() {
   await testStopScan();
   await testFastScoring();
   await testCoalescedWrites();
+  await testRunSupervision();
 
   console.log('\nAll self-tests passed.');
 }
@@ -1134,6 +1135,195 @@ async function testCoalescedWrites() {
   console.log(`✓ deleting 500 cards costs one write (${tookMs}ms), not one coalescing window each`);
 
   await rm(dir, { recursive: true, force: true });
+}
+
+/**
+ * Run-level supervision: what a whole scan does when the API misbehaves.
+ * Per-request retries existed already; these are the failures that no amount
+ * of retrying one request can fix, and that used to quietly ruin a long run.
+ */
+async function testRunSupervision() {
+  const { fatalReason, isConnectivityError } = await import('../src/errorKinds.js');
+  const { RateLimiter } = await import('../src/rateLimiter.js');
+  const { runQueue } = await import('../src/concurrency.js');
+
+  // --- classification ---
+  assert.equal(fatalReason({ status: 401, message: 'x' })?.kind, 'auth');
+  assert.equal(fatalReason({ status: 403, message: 'x' })?.kind, 'auth');
+  assert.equal(fatalReason({ status: 402, message: 'x' })?.kind, 'credits');
+  assert.equal(fatalReason({ status: 400, message: 'API 400', body: '{"error":"Insufficient balance"}' })?.kind, 'credits');
+  assert.equal(fatalReason({ status: 404, message: 'API 404', body: 'model not found' })?.kind, 'model');
+  assert.equal(fatalReason({ status: 500, message: 'API 500' }), null, 'a server error is not fatal');
+  assert.equal(fatalReason({ status: 429, message: 'rate limit' }), null, 'a rate limit is not fatal');
+  assert.equal(fatalReason({ status: 429, message: 'API 429', body: 'Quota exceeded: 60 requests per minute' }), null,
+    'a per-minute "quota exceeded" is a rate limit, not an empty account');
+  assert.equal(fatalReason({ status: 429, message: 'API 429', body: 'You exceeded your current quota, please check your plan and billing details' })?.kind, 'credits',
+    'OpenAI\'s out-of-money 429 is recognised as credits');
+  assert.equal(isConnectivityError({ message: 'fetch failed', cause: { code: 'ECONNREFUSED' } }), true);
+  assert.equal(isConnectivityError({ status: 503, message: 'API 503' }), true);
+  assert.equal(isConnectivityError({ isTimeout: true, message: 'timed out' }), false, 'a slow model is not an outage');
+  assert.equal(isConnectivityError({ status: 500, message: 'API 500' }), false);
+  console.log('✓ errors are sorted into "this card", "the whole run is broken" and "the network is down"');
+
+  // --- adaptive pacing ---
+  const limiter = new RateLimiter({ requestsPerMinute: 60 });
+  limiter.penalize(); limiter.penalize(); limiter.penalize();
+  assert.equal(limiter.stats().currentRpm, 30, 'one burst of 429s halves the pace once, not three times');
+  limiter.lastPenaltyMs -= 60_000;
+  for (let i = 0; i < 200; i++) limiter.reward();
+  assert.equal(limiter.stats().currentRpm, 60, 'the pace recovers after a quiet spell');
+  assert.equal(limiter.stats().ceilingRpm, 60, 'and never past the configured ceiling');
+  const unpaced = new RateLimiter({ requestsPerMinute: 0 });
+  unpaced.penalize();
+  assert.equal(unpaced.stats().enabled, true, 'a 429 turns pacing on even for a provider with no published limit');
+  console.log('✓ a 429 halves the pace for everyone sharing the limiter, and it climbs back once things are quiet');
+
+  // --- queue: requeue + gate ---
+  const seen = [];
+  let open;
+  let gateP = new Promise((r) => { open = r; });
+  let firstAttempt = true;
+  const queueRun = runQueue(['a', 'b'], 2, async (item, { requeue }) => {
+    seen.push(item);
+    if (item === 'a' && firstAttempt) { firstAttempt = false; requeue('a'); }
+  }, { gate: () => gateP });
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(seen, [], 'nothing runs while the gate is closed');
+  gateP = null;
+  open();
+  await queueRun;
+  assert.deepEqual(seen.sort(), ['a', 'a', 'b'], 'a requeued item runs again');
+  console.log('✓ the work queue holds everything while paused and retries handed-back items');
+
+  // --- end to end, against a fake API that can be switched mid-run ---
+  const api = { mode: 'ok', hits: [], flaky: new Map() };
+  const OK = (score = 7) => JSON.stringify({ choices: [{ message: { content: JSON.stringify({ fields: { description: score }, overall_score: score }) } }] });
+  const fake = createServer((req, res) => {
+    let b = '';
+    req.on('data', (c) => { b += c; });
+    req.on('end', () => {
+      if (!b.includes('messages')) { // probe (GET /models)
+        if (api.mode === 'down') { req.socket.destroy(); return; }
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"data":[]}'); return;
+      }
+      api.hits.push({ t: Date.now(), mode: api.mode });
+      if (api.mode === 'down') { req.socket.destroy(); return; }
+      if (api.mode === 'auth') { res.writeHead(401); res.end('{"error":"Invalid API key"}'); return; }
+      // A card that times out on both of its request attempts (the request
+      // layer already retries a timeout once), then works — exactly the case
+      // the run-level retry pass exists for.
+      const userText = JSON.parse(b).messages.find((m) => m.role === 'user')?.content || '';
+      const name = (userText.match(/Character name: (\S+)/) || [])[1];
+      if (api.flaky.get(name) > 0) { api.flaky.set(name, api.flaky.get(name) - 1); return; } // never answers
+      setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(OK()); }, 40);
+    });
+  });
+  await new Promise((r) => fake.listen(0, r));
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'sillyscore-supervise-'));
+  const charactersDir = path.join(dir, 'characters');
+  await mkdir(charactersDir, { recursive: true });
+  for (let i = 0; i < 30; i++) {
+    await writeFile(path.join(charactersDir, `c${String(i).padStart(2, '0')}.png`), buildFakePng({
+      spec: 'chara_card_v2', data: { name: `C${String(i).padStart(2, '0')}`, description: 'Scorable text for this card.', alternate_greetings: [] },
+    }));
+  }
+  const { startServer } = await import('../src/server.js');
+  const { DEFAULT_WEIGHTS } = await import('../src/scorer.js');
+  const server = await startServer({
+    charactersDir, cacheFile: path.join(dir, 'data', 'cache.json'), trashDir: path.join(dir, 'data', 'trash'),
+    configPath: path.join(dir, 'config.json'), provider: 'openai', baseURL: `http://localhost:${fake.address().port}`,
+    apiKey: 'k', model: 'm', concurrency: 3, requestsPerMinute: 0, scoreDetail: 'fast',
+    timeoutMs: 600, retryBaseDelayMs: 20, outageProbeMs: 150, weights: DEFAULT_WEIGHTS, port: 4183,
+  });
+  const base = 'http://localhost:4183';
+  const post = async (url, body = {}) => {
+    const r = await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    return { status: r.status, json: await r.json() };
+  };
+  const job = async (id) => (await fetch(`${base}/api/score/batch/${id}`)).json();
+  const until = async (id, pred, ms = 20000) => {
+    const t0 = Date.now();
+    for (;;) {
+      const j = await job(id);
+      if (pred(j)) return j;
+      if (Date.now() - t0 > ms) throw new Error(`timed out waiting; last state ${JSON.stringify({ status: j.status, state: j.state, done: j.done, errors: j.errors })}`);
+      await new Promise((r) => setTimeout(r, 60));
+    }
+  };
+  const scoredCount = async () => (await (await fetch(`${base}/api/cards`)).json()).cards.filter((c) => c.overallScore != null).length;
+
+  try {
+    // a clean first pass, with one card that times out once and should be
+    // picked up by the automatic retry pass rather than left failed
+    api.flaky.set('C07', 2);
+    const first = await post('/api/score/batch', { scope: 'all' });
+    assert.equal(first.status, 200);
+
+    // one scan at a time: a second start attaches to the first
+    const second = await post('/api/score/batch', { scope: 'all' });
+    assert.equal(second.status, 409, 'a second concurrent scan must be refused');
+    assert.equal(second.json.jobId, first.json.jobId, 'and pointed at the scan already running');
+    const active = await (await fetch(`${base}/api/score/active`)).json();
+    assert.equal(active.jobId, first.json.jobId, 'a reloaded page can find the running scan');
+    console.log('✓ a second scan is refused and pointed at the running one; a reloaded page can find it');
+
+    const firstDone = await until(first.json.jobId, (j) => j.status !== 'running');
+    assert.equal(firstDone.done, 30);
+    assert.equal(firstDone.errors, 0, `the flaky card should have been recovered, got ${firstDone.errors} failed`);
+    assert.equal(firstDone.recovered, 1);
+    console.log('✓ a card that timed out on both attempts is recovered by the automatic retry pass — the run ends 30/30, 0 failed');
+
+    // the key dies during a rescore: existing scores must survive, the scan
+    // must pause instead of failing everything, and Resume must finish it
+    api.mode = 'auth';
+    const switchAt = Date.now();
+    const rescore = await post('/api/score/batch', { scope: 'all', rescore: true });
+    const paused = await until(rescore.json.jobId, (j) => j.state === 'paused');
+    await new Promise((r) => setTimeout(r, 400));
+    const sentAfter = api.hits.filter((h) => h.t >= switchAt).length;
+    assert.equal(paused.pauseKind, 'auth');
+    assert.equal(paused.errors, 0, 'a rejected key is not 30 failed cards');
+    assert.ok(sentAfter <= 6, `requests should stop almost immediately once the key is rejected (sent ${sentAfter})`);
+    assert.equal(await scoredCount(), 30, 'a rescore that cannot run must not wipe the existing scores');
+    console.log(`✓ a rejected key pauses the scan after ${sentAfter} request(s): 0 cards failed, all 30 existing scores intact`);
+
+    api.mode = 'ok';
+    const resumed = await post(`/api/score/batch/${rescore.json.jobId}/resume`);
+    assert.equal(resumed.status, 200);
+    const afterResume = await until(rescore.json.jobId, (j) => j.status !== 'running');
+    assert.equal(afterResume.done, 30);
+    assert.equal(afterResume.errors, 0);
+    console.log('✓ after fixing the key, Resume finishes the scan with nothing lost or double-counted');
+
+    // an outage mid-scan: wait, don't fail cards, carry on alone
+    const outageRun = await post('/api/score/batch', { scope: 'all', rescore: true });
+    await until(outageRun.json.jobId, (j) => j.done >= 5);
+    api.mode = 'down';
+    const waiting = await until(outageRun.json.jobId, (j) => j.state === 'waiting');
+    assert.equal(waiting.state, 'waiting');
+    await new Promise((r) => setTimeout(r, 600));
+    api.mode = 'ok';
+    const afterOutage = await until(outageRun.json.jobId, (j) => j.status !== 'running', 30000);
+    assert.equal(afterOutage.errors, 0, `an outage must not mark cards failed (got ${afterOutage.errors})`);
+    assert.equal(afterOutage.done, 30);
+    assert.ok(afterOutage.outages >= 1);
+    console.log('✓ a network outage puts the scan into "waiting", it resumes by itself, and 0 cards are marked failed');
+
+    // stop works from a paused state too
+    api.mode = 'auth';
+    const stuck = await post('/api/score/batch', { scope: 'all', rescore: true });
+    await until(stuck.json.jobId, (j) => j.state === 'paused');
+    await post(`/api/score/batch/${stuck.json.jobId}/stop`);
+    const stopped = await until(stuck.json.jobId, (j) => j.status !== 'running');
+    assert.equal(stopped.status, 'stopped');
+    api.mode = 'ok';
+    console.log('✓ Stop works while paused, and a stopped scan frees the slot for the next one');
+  } finally {
+    server.close();
+    fake.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 main().catch((err) => {
