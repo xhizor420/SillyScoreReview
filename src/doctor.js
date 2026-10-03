@@ -142,10 +142,11 @@ export async function runDoctor(config) {
     say('      genuinely want to wait that long per card.');
   } else if (truncated.length) {
     say(`⚠ ${truncated.length}/${results.length} responses were CUT OFF (finish_reason: length).`);
-    say('  The model ran out of output budget before finishing its JSON. Each of');
-    say('  those costs a repair retry — double time — and may still fail.');
-    say('  FIX: pick a model that does not "think" out loud, or raise "maxTokens"');
-    say('  in config.json (currently ' + (config.maxTokens || 3000) + ').');
+    say('  The model ran out of output budget before finishing its JSON. Thinking');
+    say('  models spend part of that budget reasoning.');
+    say(config.maxTokens > 0
+      ? `  FIX: set "Response length limit" to 0 (no limit) in Settings — it is currently ${config.maxTokens}.`
+      : '  No limit is being sent, so this is the provider\'s own cap. FIX: set a large explicit\n  "Response length limit" in Settings (e.g. 32000).');
   } else if (succeeded.length === results.length) {
     say(`✓ All ${results.length} test cards scored successfully on the first try.`);
   } else {

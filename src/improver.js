@@ -1,5 +1,7 @@
 import { SCORABLE_FIELDS, estimateTokens } from './cardParser.js';
 import { DEFAULT_PROMPTS, systemPrompt } from './prompts.js';
+import { extractJsonObject } from './jsonExtract.js';
+import { ask, unusableAnswerError } from './scorer.js';
 
 /**
  * Rewriting a card is a different job from scoring one, and the failure modes
@@ -52,24 +54,6 @@ export function buildImprovePrompts(card, result, { fields, prompts = {}, draftI
   return { system: systemPrompt('improve', prompts, draftInstructions), user: parts.join('\n'), editable };
 }
 
-function extractJsonBlock(text) {
-  const trimmed = String(text || '').trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // fall through
-  }
-  const start = trimmed.indexOf('{');
-  const end = trimmed.lastIndexOf('}');
-  if (start !== -1 && end > start) {
-    try {
-      return JSON.parse(trimmed.slice(start, end + 1));
-    } catch {
-      // give up
-    }
-  }
-  return null;
-}
 
 function cleanFieldText(text) {
   let out = String(text ?? '');
@@ -131,28 +115,22 @@ export function measureFields(card, proposed) {
 export async function improveCard(card, result, provider, { fields, prompts = {}, draftInstructions = null } = {}) {
   const { system, user } = buildImprovePrompts(card, result, { fields, prompts, draftInstructions });
 
-  // The output *is* the card, so the budget has to scale with the card: a 4k
-  // token card cannot be rewritten inside a 3k token default.
-  const cardTokens = SCORABLE_FIELDS.reduce((s, f) => s + estimateTokens(card.fields[f]), 0);
-  const maxTokens = Math.min(16000, Math.max(3000, cardTokens * 2 + 1200));
-
-  let raw = await provider.chat({ system, user, maxTokens });
-  let parsed = extractJsonBlock(raw);
+  // No response cap here either: the answer *is* the rewritten card, and a
+  // thinking model reasons before writing it. The only limit is yours.
+  let reply = await ask(provider, { system, user });
+  let parsed = extractJsonObject(reply.content, { requireKey: 'fields' });
 
   if (!parsed || typeof parsed.fields !== 'object') {
-    raw = await provider.chat({
+    reply = await ask(provider, {
       system,
       user: `${user}\n\nYour previous response was not valid JSON matching the required schema (it may have \
 been cut off). Respond again with ONLY the JSON object. If the card is long, improve fewer fields rather than \
 returning a truncated response.`,
-      maxTokens: Math.min(16000, maxTokens + 2000),
     });
-    parsed = extractJsonBlock(raw);
+    parsed = extractJsonObject(reply.content, { requireKey: 'fields' });
   }
 
-  if (!parsed || typeof parsed.fields !== 'object') {
-    throw new Error('Model did not return a parseable improvement after retry');
-  }
+  if (!parsed || typeof parsed.fields !== 'object') throw unusableAnswerError('improvement', reply.finishReason);
 
   const proposed = {};
   for (const [field, value] of Object.entries(parsed.fields)) {

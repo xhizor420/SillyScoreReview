@@ -1,5 +1,31 @@
 import { SCORABLE_FIELDS, estimateTokens } from './cardParser.js';
 import { DEFAULT_PROMPTS, systemPrompt, promptHash } from './prompts.js';
+import { extractJsonObject } from './jsonExtract.js';
+
+/**
+ * One request, returning the answer and why it ended. Providers that can
+ * report a finish reason do; the offline mock only returns text.
+ */
+export async function ask(provider, args) {
+  if (provider.chatWithMeta) return provider.chatWithMeta(args);
+  return { content: await provider.chat(args), finishReason: null };
+}
+
+/**
+ * The error for an answer that never became usable JSON. When the provider
+ * says the answer was cut off, say that — it needs a different fix (a bigger
+ * or no response limit) from a model that ignored the format.
+ */
+export function unusableAnswerError(what, finishReason) {
+  if (finishReason === 'length') {
+    return new Error(
+      `The model's answer was cut off before the ${what} was complete (finish_reason: length). ` +
+      'Thinking models spend part of the response budget reasoning. Remove the response limit in ' +
+      'Settings (0 = no limit), or raise it; if it is already 0, the provider applies its own cap — set a large explicit limit.',
+    );
+  }
+  return new Error(`Model did not return parseable JSON ${what === 'score' ? 'after retry' : `for the ${what} after retry`}`);
+}
 
 // Relative importance of each field when computing the weighted overall score.
 // Only fields that are actually non-empty on a given card are used; the
@@ -52,24 +78,6 @@ function buildUserPrompt(card, weights, { skipZeroWeight = false } = {}) {
   return parts.join('\n');
 }
 
-function extractJsonBlock(text) {
-  const trimmed = text.trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // fall through to brace extraction below
-  }
-  const start = trimmed.indexOf('{');
-  const end = trimmed.lastIndexOf('}');
-  if (start !== -1 && end !== -1 && end > start) {
-    try {
-      return JSON.parse(trimmed.slice(start, end + 1));
-    } catch {
-      // give up
-    }
-  }
-  return null;
-}
 
 function recomputeOverall(fields, weights) {
   const present = Object.keys(fields).filter((f) => Number.isFinite(fields[f]?.score));
@@ -98,17 +106,17 @@ export async function scoreCard(card, provider, { weights = DEFAULT_WEIGHTS, det
   }
   const system = systemPromptFor(detail, prompts, draftInstructions);
 
-  // Fast mode writes a couple of dozen tokens, so it needs nowhere near the
-  // default budget — and a tight cap is itself a guard against a model that
-  // ignores the schema and starts writing an essay.
-  let raw = await provider.chat({ system, user, maxTokens: fast ? 400 : undefined });
-  let parsed = extractJsonBlock(raw);
+  // No per-request response cap: a thinking model spends part of any budget
+  // reasoning, so a cap sized for the answer alone (fast mode used to ask for
+  // 400 tokens) can cut the answer off. The only limit is the one you set.
+  let reply = await ask(provider, { system, user });
+  let raw = reply.content;
+  let parsed = extractJsonObject(raw, { requireKey: 'fields' });
 
   if (!parsed || typeof parsed.fields !== 'object') {
-    // A common cause of unparseable JSON is the response getting cut off before
-    // it closes — so the retry gets real extra headroom (not just a scolding),
-    // on top of asking for tighter wording to make it less likely to recur.
-    raw = await provider.chat({
+    // The model wrote something other than the JSON (or ran out of room).
+    // Ask once more, plainly, for just the object.
+    reply = await ask(provider, {
       system,
       user: fast
         ? `${user}\n\nYour previous response was not valid JSON. Respond again with ONLY the JSON object of \
@@ -116,15 +124,12 @@ scores, nothing else.`
         : `${user}\n\nYour previous response was not valid JSON matching the required schema (it may have \
 been cut off before finishing). Respond again with ONLY the valid JSON object, nothing else, and keep every \
 text field to one short sentence so the full response fits comfortably.`,
-      maxTokens: fast ? 800 : 4000,
     });
-    parsed = extractJsonBlock(raw);
+    raw = reply.content;
   }
 
   const result = parseScoreResponse(raw, weights);
-  if (!result) {
-    throw new Error('Model did not return parseable JSON after retry');
-  }
+  if (!result) throw unusableAnswerError('score', reply.finishReason);
   // Fingerprint the prompt that produced this, so a later prompt edit can tell
   // which scores came from the old wording.
   result.promptHash = promptHash(system);
@@ -137,7 +142,7 @@ text field to one short sentence so the full response fits comfortably.`,
  * running the full retry cycle.
  */
 export function parseScoreResponse(raw, weights = DEFAULT_WEIGHTS) {
-  const parsed = extractJsonBlock(raw);
+  const parsed = extractJsonObject(raw, { requireKey: 'fields' });
   if (!parsed || typeof parsed.fields !== 'object') return null;
 
   // Normalize/clamp scores defensively; models occasionally drift from the schema.

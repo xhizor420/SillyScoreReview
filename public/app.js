@@ -94,6 +94,7 @@ const els = {
   settingsModelCustom: document.getElementById('settingsModelCustom'),
   settingsConcurrency: document.getElementById('settingsConcurrency'),
   settingsDetail: document.getElementById('settingsDetail'),
+  settingsMaxTokens: document.getElementById('settingsMaxTokens'),
   settingsRpm: document.getElementById('settingsRpm'),
   settingsTimeout: document.getElementById('settingsTimeout'),
   concurrencyHint: document.getElementById('concurrencyHint'),
@@ -1370,6 +1371,7 @@ async function openSettings() {
     els.settingsRpm.value = data.requestsPerMinute ?? 0;
     els.settingsTimeout.value = Math.round((data.timeoutMs ?? 120000) / 1000);
     els.settingsDetail.value = data.scoreDetail || 'full';
+    els.settingsMaxTokens.value = data.maxTokens ?? 0;
     els.settingsModelCustom.value = data.model || '';
     els.apiKeyStatus.textContent = data.apiKeySet ? '(a key is saved — leave blank to keep it)' : '(none saved yet)';
     els.settingsApiKey.value = '';
@@ -1452,6 +1454,7 @@ els.saveSettingsBtn.addEventListener('click', async () => {
     requestsPerMinute: els.settingsRpm.value === '' ? undefined : Number(els.settingsRpm.value),
     timeoutMs: els.settingsTimeout.value ? Number(els.settingsTimeout.value) * 1000 : undefined,
     scoreDetail: els.settingsDetail.value,
+    maxTokens: els.settingsMaxTokens.value === '' ? undefined : Math.max(0, Number(els.settingsMaxTokens.value) || 0),
   };
   if (els.settingsApiKey.value.trim()) body.apiKey = els.settingsApiKey.value.trim();
 

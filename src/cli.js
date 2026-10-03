@@ -32,6 +32,9 @@ const DEFAULT_CONFIG = {
   // field). 'fast' = scores only, which is a fraction of the output tokens and
   // so a fraction of the time — see README, "Scanning thousands of cards fast".
   scoreDetail: 'full',
+  // Response length limit in tokens. 0 = no limit: max_tokens is not sent at
+  // all, which is what thinking models need (their reasoning counts against it).
+  maxTokens: 0,
   weights: DEFAULT_WEIGHTS,
   port: 4180,
   host: '0.0.0.0',
@@ -348,10 +351,13 @@ async function cmdStats(args) {
       console.log('A timed-out request is now retried once at double the deadline, so re-running');
       console.log('`scan` will recover many of these. If they still fail, the model is slower than');
       console.log('2x your timeout — raise "timeoutMs" in Settings, or pick a faster model.');
+    } else if (/cut off/.test(top)) {
+      console.log('Most failures are answers cut off by a response-length limit. Thinking models');
+      console.log('spend part of that budget reasoning. Set "Response length limit" to 0 (no limit)');
+      console.log('in Settings; if it already is, the provider caps it — set a large explicit limit.');
     } else if (/JSON/.test(top)) {
-      console.log('Most failures are unusable output, not speed. This usually means the model');
-      console.log('spends its output budget "thinking" instead of answering, or ignores the JSON');
-      console.log('format. Try a different (non-reasoning) model, or raise "maxTokens".');
+      console.log('Most failures are unusable output, not speed: the model ignored the JSON format.');
+      console.log('Test the prompt on one card in the Prompts panel to see what it actually returns.');
     } else if (/429|Rate limited/.test(top)) {
       console.log('Most failures are rate limits. Lower "Requests per minute" in Settings.');
     } else if (/Auth/.test(top)) {

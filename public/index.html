@@ -245,6 +245,14 @@
   </div>
 
   <div class="settings-field">
+    <label for="settingsMaxTokens">Response length limit (tokens) <span class="folder-hint">(0 = no limit)</span></label>
+    <input id="settingsMaxTokens" type="number" min="0" max="1000000" step="1000" />
+    <p class="folder-hint">0 sends no limit at all — best for thinking models such as GLM, whose reasoning
+    counts against the limit and can otherwise cut the answer off. Only set a number if your provider needs one,
+    or to cap cost.</p>
+  </div>
+
+  <div class="settings-field">
     <label for="settingsTimeout">Timeout per request (seconds)</label>
     <input id="settingsTimeout" type="number" min="5" max="900" />
     <p class="folder-hint">A request that times out is retried once with double this deadline before the card is marked failed.</p>

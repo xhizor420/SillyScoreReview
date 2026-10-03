@@ -1111,6 +1111,7 @@ export async function startServer(config) {
       requestsPerMinute: config.requestsPerMinute ?? preset?.requestsPerMinute ?? 0,
       timeoutMs: config.timeoutMs ?? 120000,
       scoreDetail: config.scoreDetail || 'full',
+      maxTokens: config.maxTokens > 0 ? config.maxTokens : 0,
       charactersDir: config.charactersDir,
       authRequired: Boolean(config.authToken),
       presets: PROVIDER_PRESETS,
@@ -1118,7 +1119,7 @@ export async function startServer(config) {
   });
 
   app.post('/api/settings', async (req, res) => {
-    const { provider, model, baseURL, apiKey, concurrency, requestsPerMinute, timeoutMs, scoreDetail } = req.body || {};
+    const { provider, model, baseURL, apiKey, concurrency, requestsPerMinute, timeoutMs, scoreDetail, maxTokens } = req.body || {};
     if (scoreDetail !== undefined && scoreDetail !== 'full' && scoreDetail !== 'fast') {
       return res.status(400).json({ error: `Unknown scoring detail "${scoreDetail}"` });
     }
@@ -1135,6 +1136,7 @@ export async function startServer(config) {
     }
     if (timeoutMs) config.timeoutMs = Math.max(5000, Number(timeoutMs));
     if (scoreDetail !== undefined) config.scoreDetail = scoreDetail;
+    if (maxTokens !== undefined && maxTokens !== '') config.maxTokens = Math.max(0, Math.floor(Number(maxTokens) || 0));
 
     let persisted = true;
     let persistError = null;
@@ -1148,6 +1150,7 @@ export async function startServer(config) {
       if (requestsPerMinute !== undefined && requestsPerMinute !== '') patch.requestsPerMinute = config.requestsPerMinute;
       if (timeoutMs) patch.timeoutMs = config.timeoutMs;
       if (scoreDetail !== undefined) patch.scoreDetail = scoreDetail;
+      if (maxTokens !== undefined && maxTokens !== '') patch.maxTokens = config.maxTokens;
       await persistConfigPatch(patch);
     } catch (err) {
       persisted = false;

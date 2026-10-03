@@ -9,6 +9,7 @@
 export function classifyError(message = '') {
   const m = String(message);
   if (/timed out|aborted/i.test(m)) return 'Request timed out (model too slow)';
+  if (/cut off/i.test(m)) return 'Answer cut off by a response-length limit';
   if (/parseable JSON|did not return/i.test(m)) return 'Model returned unusable/incomplete JSON';
   if (/\b429\b|rate limit/i.test(m)) return 'Rate limited by the provider (429)';
   if (/\b401\b|\b403\b|unauthor|forbidden|api key/i.test(m)) return 'Auth rejected (401/403) — check your API key';

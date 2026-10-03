@@ -418,7 +418,7 @@ async function main() {
   await rm(dir, { recursive: true, force: true });
 
   await testRetryAfterHonored();
-  await testJsonRepairRetryGetsMoreTokens();
+  await testResponseLimitAndThinking();
   await testTimeoutRetriesOnlyOnce();
   await testTimeoutRetryGetsLongerDeadline();
   await testCacheFollowsTheFolder();
@@ -651,39 +651,69 @@ async function testRetryAfterHonored() {
 // same budget and get cut off identically. This was a real bug found by driving
 // the CLI against a fake provider that truncates: every affected card cost 2x
 // the latency and still failed. Guards against that regressing silently.
-async function testJsonRepairRetryGetsMoreTokens() {
-  const requestedMaxTokens = [];
+/**
+ * Response length and thinking models. No limit is sent unless you set one
+ * (their reasoning counts against any limit); a limit you do set is sent as
+ * is; reasoning that arrives inline never gets mistaken for the answer; and an
+ * answer cut off by a limit is reported as exactly that.
+ */
+async function testResponseLimitAndThinking() {
+  const sentMaxTokens = [];
+  let mode = 'truncate-then-ok';
+  const answer = JSON.stringify({ fields: { description: { score: 7, strengths: 'ok', weaknesses: 'ok', suggestions: 'ok' } }, overall_score: 7, top_priority_improvements: [], summary: 'ok' });
   const fakeApi = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       const parsed = JSON.parse(body);
-      requestedMaxTokens.push(parsed.max_tokens);
-      const content =
-        requestedMaxTokens.length === 1
-          ? '{"fields": {"description": {"score": 7, "strengths": "cut off mid-strin' // truncated, invalid JSON
-          : JSON.stringify({ fields: { description: { score: 7, strengths: 'ok', weaknesses: 'ok', suggestions: 'ok' } }, overall_score: 7, top_priority_improvements: [], summary: 'ok' });
+      sentMaxTokens.push('max_tokens' in parsed ? parsed.max_tokens : 'not sent');
+      let content = answer;
+      let finish = 'stop';
+      if (mode === 'truncate-then-ok' && sentMaxTokens.length === 1) content = '{"fields": {"description": {"score": 7, "strengths": "cut off mid-strin';
+      if (mode === 'think') content = '<think>The first_mes has "{{user}} smiles" and {{char}} acts for {{user}} — {draft}.</think>\n' + answer;
+      if (mode === 'think-no-open-tag') content = 'Weighing {{user}} and {{char}} macros {here}.</think>' + answer;
+      if (mode === 'always-cut') { content = '{"fields": {"description": {"score": 7, "stren'; finish = 'length'; }
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+      res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: finish }] }));
     });
   });
   await new Promise((resolve) => fakeApi.listen(0, resolve));
   const port = fakeApi.address().port;
-
   const { scoreCard } = await import('../src/scorer.js');
-  const provider = createProvider({ provider: 'openai', baseURL: `http://localhost:${port}`, apiKey: 'test', model: 'test-model' });
-  const card = { name: 'Truncation Test Card', fields: { description: 'A test description.' } };
-  const result = await scoreCard(card, provider);
+  const card = { name: 'Limit Test Card', fields: { description: 'A test description.' } };
+  const make = (extra = {}) => createProvider({ provider: 'openai', baseURL: `http://localhost:${port}`, apiKey: 'test', model: 'test-model', ...extra });
+
+  // default: no limit sent, on the first attempt or the repair retry
+  const r1 = await scoreCard(card, make());
+  assert.equal(r1.fields.description.score, 7);
+  assert.deepEqual(sentMaxTokens, ['not sent', 'not sent'], 'with no limit set, max_tokens must not be sent at all');
+  console.log('✓ by default no response limit is sent — not on the first try, not on the retry');
+
+  // fast mode used to send its own 400-token cap; it must not any more
+  sentMaxTokens.length = 0; mode = 'ok';
+  await scoreCard(card, make(), { detail: 'fast' }).catch(() => {});
+  assert.equal(sentMaxTokens[0], 'not sent', 'fast mode must not impose its own cap');
+
+  // a limit you set is sent as-is
+  sentMaxTokens.length = 0;
+  await scoreCard(card, make({ maxTokens: 12000 }));
+  assert.equal(sentMaxTokens[0], 12000);
+  console.log('✓ fast mode no longer sends its own cap; a limit you set is sent exactly as set');
+
+  // thinking models: inline reasoning full of {{user}} braces is not the answer
+  for (const m of ['think', 'think-no-open-tag']) {
+    mode = m;
+    const r = await scoreCard(card, make());
+    assert.equal(r.overall_score, 7, `${m}: the answer after the reasoning must be read`);
+  }
+  console.log('✓ an answer that follows inline <think> reasoning (braces and all) is read correctly');
+
+  // a cut-off answer says so, rather than "unusable JSON"
+  mode = 'always-cut';
+  await assert.rejects(scoreCard(card, make({ maxTokens: 500 })), /cut off.*finish_reason: length/s);
+  console.log('✓ an answer cut off by a response limit is reported as cut off, with the fix');
 
   fakeApi.close();
-
-  assert.equal(requestedMaxTokens.length, 2, 'expected exactly one repair retry');
-  assert.ok(
-    requestedMaxTokens[1] > requestedMaxTokens[0],
-    `expected the retry's max_tokens (${requestedMaxTokens[1]}) to exceed the first attempt's (${requestedMaxTokens[0]})`,
-  );
-  assert.equal(result.fields.description.score, 7);
-  console.log(`✓ JSON-repair retry raises max_tokens (${requestedMaxTokens[0]} → ${requestedMaxTokens[1]}) instead of resending the same budget`);
 }
 
 /**
@@ -1039,9 +1069,10 @@ async function testFastScoring() {
   const fullChars = JSON.stringify(full).length;
   const fastChars = JSON.stringify({ fields: { description: 8, first_mes: 6 }, overall_score: 7.4 }).length;
   assert.ok(fullChars > fastChars * 5, `expected the full answer to dwarf the fast one (${fullChars} vs ${fastChars})`);
-  assert.ok(seen[1].maxTokens < seen[0].maxTokens || seen[1].maxTokens <= 400,
-    `fast mode should ask for a small output budget (got ${seen[1].maxTokens})`);
-  console.log(`✓ fast mode asks the model for ~${(fullChars / fastChars).toFixed(0)}x less output (budget ${seen[1].maxTokens} vs ${seen[0].maxTokens ?? 'default'} tokens)`);
+  // Fast mode gets its speed from asking for less, not from capping the
+  // answer: a cap would cut off a thinking model mid-reasoning.
+  assert.equal(seen[1].maxTokens, undefined, 'fast mode must not send its own response cap');
+  console.log(`✓ fast mode asks the model for ~${(fullChars / fastChars).toFixed(0)}x less output — without capping the response`);
 
   const fastPrompts = buildScoringPrompts(card, undefined, { detail: 'fast' });
   const fullPrompts = buildScoringPrompts(card, undefined, { detail: 'full' });

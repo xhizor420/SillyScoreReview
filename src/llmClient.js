@@ -122,6 +122,24 @@ async function withRetries(fn, { retries = 4, baseDelayMs = 1500 } = {}) {
   throw lastErr;
 }
 
+/**
+ * The response-length limit to send, if any.
+ *
+ * `maxTokens` in config is the user's choice: a positive number is a hard cap
+ * sent as-is; 0 (the default) means "no limit" and max_tokens is left out of
+ * the request entirely. That matters for thinking models: their reasoning
+ * usually counts against max_tokens, so any fixed cap risks the answer being
+ * cut off after the model has spent the budget thinking.
+ *
+ * There are deliberately no per-request caps any more (fast mode used to ask
+ * for 400, improve for at most 16k): with a thinking model, any of them could
+ * truncate the answer.
+ */
+export function responseLimit(config) {
+  const n = Number(config.maxTokens);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
 /** Anthropic Messages API. */
 function createAnthropicProvider(config) {
   const apiKey = config.apiKey || process.env.ANTHROPIC_API_KEY;
@@ -148,9 +166,13 @@ function createAnthropicProvider(config) {
     model,
     limiter,
     probe,
-    async chat({ system, user, maxTokens }) {
+    async chat(args) {
+      return (await this.chatWithMeta(args)).content;
+    },
+    async chatWithMeta({ system, user }) {
       return withRetries(async ({ timeoutMultiplier = 1 } = {}) => {
         await limiter.acquire();
+        const startedAt = Date.now();
         const res = await fetchWithTimeout(
           `${baseURL}/v1/messages`,
           {
@@ -162,7 +184,9 @@ function createAnthropicProvider(config) {
             },
             body: JSON.stringify({
               model,
-              max_tokens: maxTokens || config.maxTokens || 3000,
+              // The Messages API requires max_tokens, so "no limit" can't mean
+              // leaving it out here; send a generous ceiling instead.
+              max_tokens: responseLimit(config) ?? 8192,
               system,
               messages: [{ role: 'user', content: user }],
             }),
@@ -181,7 +205,13 @@ function createAnthropicProvider(config) {
         }
         limiter.reward();
         const json = await res.json();
-        return json.content?.map((c) => c.text || '').join('') || '';
+        return {
+          content: json.content?.filter((c) => c.type === 'text').map((c) => c.text || '').join('') || '',
+          // Normalised to the OpenAI wording so callers check one value.
+          finishReason: json.stop_reason === 'max_tokens' ? 'length' : json.stop_reason ?? null,
+          usage: json.usage ?? null,
+          latencyMs: Date.now() - startedAt,
+        };
       }, { baseDelayMs: config.retryBaseDelayMs ?? 1500 });
     },
   };
@@ -202,7 +232,8 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
     burst: config.burst ?? preset?.burst,
   });
 
-  async function call({ system, user, maxTokens }) {
+  async function call({ system, user }) {
+    const limit = responseLimit(config);
     return withRetries(async ({ timeoutMultiplier = 1 } = {}) => {
       // Pace against the provider's published requests/minute ceiling before
       // opening the connection — staying inside the limit rather than finding
@@ -220,7 +251,8 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
           body: JSON.stringify({
             model,
             temperature: config.temperature ?? 0.2,
-            max_tokens: maxTokens || config.maxTokens || 3000,
+            // No limit unless you set one (see responseLimit).
+            ...(limit ? { max_tokens: limit } : {}),
             messages: [
               { role: 'system', content: system },
               { role: 'user', content: user },
@@ -245,8 +277,15 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
       }
       limiter.reward();
       const json = await res.json();
+      const message = json.choices?.[0]?.message || {};
       return {
-        content: json.choices?.[0]?.message?.content || '',
+        // Thinking models: some providers return the reasoning in its own
+        // field (reasoning_content / reasoning) and only the answer here;
+        // others put "<think>…</think>" in front of the answer in this field.
+        // Either way the reasoning is not the answer — the JSON reader strips
+        // inline think blocks, and the separate field is only measured.
+        content: message.content || '',
+        reasoningChars: (message.reasoning_content || message.reasoning || '').length,
         finishReason: json.choices?.[0]?.finish_reason ?? null,
         usage: json.usage ?? null,
         latencyMs: Date.now() - startedAt,
