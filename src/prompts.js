@@ -93,8 +93,61 @@ Respond with ONLY a single valid JSON object (no markdown fences, no commentary)
   "fields": {
     "<field_name>": { "text": "<the full rewritten field text>", "why": "<one short sentence on what you changed>" }
   },
+  "new_lorebook_entries": [
+    { "keys": ["<word that should bring this up>", "<another>"], "content": "<the moved text, in the card's own words>" }
+  ],
   "headline": "<one sentence on the overall change>"
-}`;
+}
+Only fill "new_lorebook_entries" when a change you were asked to make moves detail out of a field into the lorebook; \
+otherwise leave it as an empty list. Moved text keeps the card's own wording — it is relocated, not rewritten.`;
+
+// ---- improvement ideas: the step between rating and rewriting ----
+
+const IDEAS_INSTRUCTIONS = `You are a senior editor for SillyTavern character cards. The card below has been rated. Your \
+job now is to propose specific improvements the owner can choose from. Do not rewrite anything yet.
+
+First, identify what makes this card itself: its voice and speech patterns, quirks, formatting style (prose, \
+W++, PList, asterisk actions, tense and point of view), signature lines, relationships and canon facts. These \
+go in "keep", and every idea must leave them intact. In "keep_quotes", copy a few short phrases exactly as \
+written in the card that carry its voice and must survive word for word.
+
+Then propose improvements. A good idea is specific ("cut the second paragraph of description, which restates \
+the personality list") rather than general ("make it more concise"), fixes a weakness the rating named, and \
+never invents new backstory, powers, relatives or plot.
+
+Also check the card against the Character Card V2 spec and SillyTavern practice:
+- system_prompt and post_history_instructions REPLACE the user's own system prompt and jailbreak unless they \
+contain {{original}}. If either is set without {{original}}, suggest adding it, unless the override is clearly intended.
+- creator_notes are never sent to the model. Character facts or instructions placed there have no effect; \
+credits, links or usage notes placed in description or other prompt fields waste tokens and confuse the model.
+- alternate_greetings are swipes for the first message: each should be a distinct, complete opening, not a \
+near-copy of first_mes.
+- Use {{char}} and {{user}} rather than hard-coded names where the card means the character or the user.
+- The first message and example dialogue should not speak, act or decide for {{user}}.
+- Background that only matters in some scenes (side characters, places, history, item details) can move from \
+an always-sent field into lorebook entries, which are only inserted when their keywords come up. Nothing is \
+lost, and every turn costs fewer tokens. Mark these ideas "lorebook": true, with "field" set to the field the \
+text moves out of. Only suggest this when the card supports a lorebook (stated below).
+
+Rate each idea's impact on quality honestly, and say plainly how an idea could change the card's feel.`;
+
+const IDEAS_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary) in exactly this shape:
+{
+  "keep": ["<one thing that makes this card itself and must survive any rewrite>"],
+  "keep_quotes": ["<a short phrase copied exactly from the card>"],
+  "ideas": [
+    {
+      "field": "<field_name>",
+      "title": "<5-8 word title>",
+      "change": "<the specific change to make>",
+      "why": "<the weakness it fixes>",
+      "impact": "high" | "medium" | "low",
+      "risk": "<how it could change the card's feel, or none>",
+      "lorebook": false
+    }
+  ]
+}
+Use only the field names given below. Give 3 to 8 ideas, highest impact first.`;
 
 export const PROMPT_KINDS = {
   full: {
@@ -109,9 +162,15 @@ export const PROMPT_KINDS = {
     defaultInstructions: FAST_INSTRUCTIONS,
     format: FAST_FORMAT,
   },
+  ideas: {
+    label: 'Improvement ideas',
+    description: 'Step 1 of "Improve with AI": reads the card and its rating, lists what makes it itself (kept in any rewrite) and proposes specific changes for you to choose from. Nothing is rewritten here.',
+    defaultInstructions: IDEAS_INSTRUCTIONS,
+    format: IDEAS_FORMAT,
+  },
   improve: {
     label: 'Improve card',
-    description: 'Used by "Improve with AI": rewrites the weak fields of a card using its own critique.',
+    description: 'Step 2 of "Improve with AI": rewrites only the fields your chosen ideas touch, keeping everything on the keep list.',
     defaultInstructions: IMPROVE_INSTRUCTIONS,
     format: IMPROVE_FORMAT,
   },

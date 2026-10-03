@@ -134,7 +134,8 @@ scores instead of demanding a rescan.
 |---|---|
 | **Full critique** | scoring with written feedback — your original rubric |
 | **Fast scoring** | scoring when *Scoring detail* is set to Fast |
-| **Improve card** | *Improve with AI* |
+| **Improvement ideas** | step 2 of *Improve with AI* — the keep list and the menu of changes |
+| **Improve card** | step 3 of *Improve with AI* — the rewrite of the changes you chose |
 
 Each prompt has two parts. **Your instructions** are fully editable — a different
 rubric, stricter or kinder grading, a genre focus ("judge these as horror cards"),
@@ -165,41 +166,67 @@ built-in prompt back. Edits are saved to `config.json` under `prompts`.
 ## Improving a card
 
 Scoring tells you a card is a 4/10. **Improve with AI**, on the card itself, does
-something about it: the model gets the card *and its own critique of that card*, and
-rewrites only the fields that need work.
+something about it — in two steps, so you decide what changes and the card keeps its
+feel.
 
-What comes back is a **draft, not a file**. You get, per field:
+**1 · Rating.** Score the card first (a full critique gives the next step the most to
+work with; a card scored in fast mode or not at all still works, from its text alone).
 
-- the original and the rewrite side by side, each editable;
-- a live token count — `180 → 140 tok (-40)`, green when it shrank, red when it grew;
-- the one-line reason the model gives for each change;
-- **Revert this field** to throw away any rewrite you don't like.
+**2 · Choose ideas.** The model reads the card and its rating and comes back with:
 
-Then save it as a **new card** (the default — the original is untouched and keeps its
-score) or **replace the original** (a copy of the pre-edit file goes to Trash, so it's
-undoable). Leave *Score it after saving* ticked and the new card is scored straight
-away, so the card and the grid both show the before/after: **6.1 → 8.4 (+2.3)**.
+- **What makes this card itself** — its voice, quirks, formatting, signature lines, canon
+  facts. This list is editable: add anything you want protected, remove anything you're
+  happy to change. It is sent with the rewrite as a set of hard rules.
+- **Exact lines that must survive word for word** — a few of the card's own phrases.
+  After the rewrite, the dashboard checks they're all still there (and warns you, live,
+  if one goes missing). A "quote" the model got wrong is dropped, since a line that isn't
+  really in the card can't be protected.
+- **A menu of specific changes**, each with the field it touches, what it fixes, how much
+  it matters, and — plainly — how it could change the card's feel. High- and
+  medium-impact ideas with no such risk come pre-ticked; anything risky or minor is yours
+  to opt into.
 
-Because the improved card keeps the character's name, it lands in the same duplicate
-group as its parent — so after it scores higher, **Select all but the best of each**
-picks the old one for deletion. The whole loop closes.
-
-Two rules are enforced rather than merely requested, because a rewrite gets them wrong
-in ways that are easy to miss:
+The ideas also check the card against the
+[Character Card V2 spec](https://github.com/malfoyslastname/character-card-spec-v2):
 
 | | |
 |---|---|
-| **No padding** | The prompt forbids making any field longer, and the UI flags a rewrite that grew anyway. A longer card is a worse card — that's the entire premise of this tool. |
-| **Keep the macros** | If the original used `{{user}}` or `{{char}}` and the rewrite has none left, you get a warning. Dropping a *repeated* macro is fine editing and is not flagged. |
+| `system_prompt` / `post_history_instructions` | These **replace** your own system prompt and jailbreak unless they contain `{{original}}`. A card that sets one without it is flagged. |
+| `creator_notes` | Never sent to the model. Facts or instructions placed there do nothing; credits and usage notes placed in the description waste tokens. |
+| `alternate_greetings` | Swipes for the first message — each should be a distinct, complete opening, not a near-copy. |
+| `{{char}}` / `{{user}}` | Hard-coded names where the card means the character or the user. |
+| **Lorebook moves** | Background that only matters in some scenes can move out of an always-sent field into **lorebook entries**, which SillyTavern only sends when a keyword comes up. Nothing is deleted, and every turn costs fewer tokens. |
 
-The model is also told, in priority order, to keep the same character (no invented
-backstory, powers or relatives), fix exactly what the critique named, and preserve the
-card's formatting conventions — `<START>` blocks, the narrative person and tense of
-`first_mes`, and so on.
+**3 · Review the rewrite.** Only the fields your ticked ideas touch are sent to the model
+at all — and if it rewrites anything else anyway, that is thrown away. What comes back is
+a **draft, not a file**:
 
-Nothing else in the card is touched. Lorebooks (`character_book`), creator notes, tags,
-`extensions` and the artwork itself are copied through byte-for-byte; only the text you
-changed is rewritten.
+- the original and the rewrite side by side, each editable, with a live token count
+  (`180 → 140 tok (-40)`) and the reason for each change;
+- **Revert this field** to throw away any rewrite you don't like;
+- any **new lorebook entries**, with editable keywords and text (or remove one to leave
+  that text out). Moved text keeps the card's own wording; existing entries are untouched.
+
+Save it as a **new card** (the default — the original is untouched and keeps its score)
+or **replace the original** (a copy of the pre-edit file goes to Trash). Leave *Score it
+after saving* ticked to see the before/after straight away: **5.1 → 8.2 (+3.1)**.
+
+Because the improved card keeps the character's name, it lands in the same duplicate
+group as its parent — so after it scores higher, **Select all but the best of each**
+picks the old one for deletion.
+
+Checked in code, not just asked for in the prompt:
+
+| | |
+|---|---|
+| **No padding** | A rewritten field that grew is flagged. A longer card is a worse card. |
+| **Keep the macros** | If the original used `{{user}}` or `{{char}}` and the rewrite has none left, you're warned. Dropping a *repeated* macro is fine editing. |
+| **Protected lines** | Any exact line from the keep list that disappears is flagged, live. |
+| **Only what you chose** | Unchosen fields are never sent, and rewrites of them are discarded. |
+
+Everything else in the card — lorebook, creator notes, tags, `extensions`, the artwork —
+is copied through byte-for-byte. Both steps' prompts are editable in **Prompts**
+(*Improvement ideas* and *Improve card*).
 
 ## Editing a card by hand
 
@@ -214,6 +241,24 @@ A scan of a few thousand cards runs for hours. **Stop scan** in the progress pan
 it without killing the server: cards already in flight finish and are saved, cards that
 hadn't started are left alone, and **Scan unscored** afterwards picks up exactly where it
 left off. Nothing is lost and nothing is scored twice.
+
+## Thinking models (GLM and others)
+
+Models that reason before answering are fully supported:
+
+- **No response-length limit by default.** A thinking model's reasoning counts against
+  any limit, so a cap sized for the answer can cut the answer off after the model spent
+  the budget thinking. Nothing is capped unless you set **Settings → Response length
+  limit** (0 = no limit). If a provider does cut an answer off, it's reported as exactly
+  that, with the fix — not as "unusable JSON".
+- **Reasoning is never mistaken for the answer.** Whether it arrives as `<think>…</think>`
+  before the answer, with the opening tag already stripped, or in a separate field, the
+  answer is found after it. This matters more than it sounds: reasoning quotes the card,
+  and card text is full of braces (`{{user}}`, `{{char}}`). The previous reader started
+  inside the reasoning and failed — it could not read *any* answer that had reasoning in
+  front of it.
+- Thinking takes longer. If cards time out, raise **Timeout per request** in Settings
+  (a timed-out request is already retried once at double the time).
 
 ## When things go wrong mid-scan
 

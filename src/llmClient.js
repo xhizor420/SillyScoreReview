@@ -334,11 +334,12 @@ function parseImprovePromptFields(user) {
     const field = parts[i];
     const body = (parts[i + 1] || '')
       .split('\n')
-      .filter((line) => !line.startsWith('Critique of this field:'))
+      .filter((line) => !line.startsWith('Critique of this field:') && !line.startsWith('Rating of this field:'))
       .join('\n')
       .trim();
     // Drop the trailing instruction paragraph that follows the last field.
-    const cut = body.indexOf('\nRewrite only the fields');
+    let cut = body.indexOf('\nRewrite only the fields');
+    if (cut === -1) cut = body.indexOf('\nFields you may suggest');
     out[field] = (cut === -1 ? body : body.slice(0, cut)).trim();
   }
   return out;
@@ -367,16 +368,48 @@ function createMockProvider() {
 
       // Recognised by its locked response format, not its wording — the
       // instructions part is user-editable and may say anything.
+      // Ideas step: a deterministic menu built from the real card, so the
+      // offline path exercises the same choose-then-rewrite flow.
+      if (/"keep_quotes": \["<a short phrase copied exactly from the card>"\]/.test(system || '')) {
+        const originals = parseImprovePromptFields(user);
+        const lorebookOk = /lorebook ideas are allowed/.test(user);
+        const ideas = [];
+        let quote = null;
+        for (const [field, text] of Object.entries(originals)) {
+          if (!text) continue;
+          if (!quote && field === 'first_mes') quote = text.split(/\s+/).slice(0, 4).join(' ');
+          ideas.push({
+            field, title: `Tighten the ${field.replace(/_/g, ' ')}`, change: `Cut repeated phrasing in ${field}.`,
+            why: 'Mock provider: no real analysis.', impact: ideas.length ? 'medium' : 'high', risk: 'none', lorebook: false,
+          });
+          if (lorebookOk && field === 'description' && text.split(/\s+/).length > 40) {
+            ideas.push({
+              field, title: 'Move background into the lorebook', change: 'Move the second half of the description into a lorebook entry.',
+              why: 'Mock provider: long always-on background.', impact: 'medium', risk: 'Background only appears when its keyword comes up.', lorebook: true,
+            });
+          }
+        }
+        return JSON.stringify({ keep: ['Mock provider: the card\'s voice'], keep_quotes: quote ? [quote] : [], ideas });
+      }
+
       if (/"headline": "<one sentence on the overall change>"/.test(system || '')) {
         const originals = parseImprovePromptFields(user);
+        const moveToLorebook = /Move this detail into new lorebook entries/.test(user);
         const fields = {};
+        const entries = [];
         for (const [field, text] of Object.entries(originals)) {
           if (!text) continue;
           const words = text.split(/\s+/);
+          if (moveToLorebook && field === 'description' && words.length > 40) {
+            const half = Math.ceil(words.length / 2);
+            fields[field] = { text: words.slice(0, half).join(' '), why: 'Mock provider: moved background to the lorebook.' };
+            entries.push({ keys: [words.find((w) => w.length > 4) || 'background'], content: words.slice(half).join(' ') });
+            continue;
+          }
           const kept = words.slice(0, Math.max(3, Math.ceil(words.length * 0.8))).join(' ');
           fields[field] = { text: kept, why: 'Mock provider: trimmed filler, no real editing performed.' };
         }
-        return JSON.stringify({ fields, headline: 'Mock provider edit — use a real provider for actual rewrites.' });
+        return JSON.stringify({ fields, new_lorebook_entries: entries, headline: 'Mock provider edit — use a real provider for actual rewrites.' });
       }
 
       // crude heuristic: score inversely correlated with filler/repetition, just for pipeline testing

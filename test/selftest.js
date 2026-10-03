@@ -431,6 +431,7 @@ async function main() {
   await testCoalescedWrites();
   await testRunSupervision();
   await testEditablePrompts();
+  await testIdeasThenRewrite();
 
   console.log('\nAll self-tests passed.');
 }
@@ -1402,6 +1403,100 @@ async function testEditablePrompts() {
   assert.equal(r.overall_score, 3);
   assert.equal(r.promptHash, P.promptHash(seen[0]), 'each score records the prompt that produced it');
   console.log('✓ scores made with an edited prompt parse normally and record which prompt made them');
+}
+
+/**
+ * Rate → ideas → rewrite-only-what-you-chose. The point is control over what
+ * changes, so this checks what reaches the model, what is thrown away, and
+ * what ends up in the file — not just that something comes back.
+ */
+async function testIdeasThenRewrite() {
+  const { generateIdeas, improveCard } = await import('../src/improver.js');
+  const { extractCardFromPng } = await import('../src/cardParser.js');
+
+  const raw = {
+    spec: 'chara_card_v2', spec_version: '2.0',
+    data: {
+      name: 'Wren', description: 'Wren keeps a lighthouse. ' + 'The old harbour has a long history of wrecks and smugglers. '.repeat(8),
+      personality: 'Dry, watchful.', scenario: '', first_mes: '*Wren squints at you.* "Storm\'s coming, {{user}}."',
+      mes_example: '', system_prompt: 'Always stay in character.', post_history_instructions: '', alternate_greetings: [],
+      creator_notes: 'Made by Anon. Use with a fantasy preset.',
+      character_book: { entries: [{ id: 1, keys: ['lamp'], content: 'The lamp never goes out.', extensions: { mine: true }, enabled: true, insertion_order: 5 }], extensions: {} },
+      extensions: { depth_prompt: { depth: 4 } },
+    },
+  };
+  const parsed = extractCardFromPng(buildFakePng(raw));
+
+  // --- ideas: checked against the card ---
+  let seenIdeasPrompt = '';
+  const ideasProvider = {
+    name: 'stub', model: 'stub',
+    async chat({ user }) {
+      seenIdeasPrompt = user;
+      return JSON.stringify({
+        keep: ['Dry, clipped speech', 'Lighthouse keeper'],
+        keep_quotes: ['Storm\'s coming, {{user}}.', 'a line that is not in the card at all'],
+        ideas: [
+          { field: 'description', title: 'Move harbour lore out', change: 'Move the wreck history to the lorebook.', why: 'Repeats.', impact: 'HIGH', risk: 'none', lorebook: true },
+          { field: 'system_prompt', title: 'Add {{original}}', change: 'Add {{original}} so the user prompt is kept.', why: 'Replaces the user prompt.', impact: 'medium', risk: 'none', lorebook: false },
+          { field: 'not_a_field', title: 'Bogus', change: 'x', impact: 'low' },
+        ],
+      });
+    },
+  };
+  const ideas = await generateIdeas(parsed, null, ideasProvider);
+  assert.ok(seenIdeasPrompt.includes('creator_notes (shown to users, never sent to the model)'), 'the model must see creator_notes to judge them');
+  assert.ok(seenIdeasPrompt.includes('Existing lorebook: 1 entry'), 'and what the lorebook already holds');
+  assert.equal(ideas.ideas.length, 2, 'ideas for fields the card does not have are dropped');
+  assert.equal(ideas.ideas[0].impact, 'high');
+  assert.deepEqual(ideas.keepQuotes, ['Storm\'s coming, {{user}}.'], 'a "quote" that is not really in the card is dropped — it could not be protected');
+  console.log('✓ ideas are checked against the card: unknown fields dropped, misquotes dropped, creator_notes and lorebook shown to the model');
+
+  const v1 = extractCardFromPng(buildFakePng({ name: 'Flat', description: 'x '.repeat(80), first_mes: 'hi' }));
+  const v1ideas = await generateIdeas(v1, null, { name: 's', model: 's', async chat() {
+    return JSON.stringify({ keep: [], keep_quotes: [], ideas: [{ field: 'description', title: 't', change: 'move it', impact: 'high', lorebook: true }] });
+  } });
+  assert.equal(v1ideas.ideas[0].lorebook, false, 'a V1 card has no lorebook, so lorebook ideas are switched off');
+
+  // --- rewrite: only chosen fields are sent, others are thrown away even if returned ---
+  let seenRewritePrompt = '';
+  const rewriteProvider = {
+    name: 'stub', model: 'stub',
+    async chat({ user }) {
+      seenRewritePrompt = user;
+      return JSON.stringify({
+        fields: {
+          description: { text: 'Wren keeps a lighthouse.', why: 'Moved the lore out.' },
+          personality: { text: 'TOTALLY DIFFERENT PERSON', why: 'Nobody asked for this.' },
+          first_mes: { text: '*Wren looks up.* "Hello."', why: 'Nobody asked for this either.' },
+        },
+        new_lorebook_entries: [{ keys: ['harbour', 'wreck'], content: 'The old harbour has a long history of wrecks and smugglers.' }],
+        headline: 'Moved lore.',
+      });
+    },
+  };
+  const plan = { ideas: [ideas.ideas[0]], keep: ['Dry, clipped speech'], keepQuotes: ideas.keepQuotes };
+  const proposal = await improveCard(parsed, null, rewriteProvider, { plan });
+  assert.ok(seenRewritePrompt.includes('### description'), 'the chosen field is sent');
+  assert.ok(!seenRewritePrompt.includes('### personality') && !seenRewritePrompt.includes('### first_mes'), 'fields nobody chose a change for are not sent at all');
+  assert.ok(seenRewritePrompt.includes('Apply ONLY these') && seenRewritePrompt.includes('Dry, clipped speech') && seenRewritePrompt.includes('"Storm\'s coming, {{user}}."'),
+    'the chosen changes, the keep list and the exact quotes are all in the request');
+  assert.deepEqual(Object.keys(proposal.fields), ['description'], 'rewrites of fields nobody chose are discarded');
+  assert.equal(proposal.lorebookEntries.length, 1);
+  assert.deepEqual(proposal.lostQuotes, [], 'the protected first_mes line was untouched, so nothing is lost');
+  console.log('✓ the rewrite only sees the fields you chose; rewrites of anything else are thrown away');
+
+  // a keep-quote that disappears from a chosen field is flagged
+  const lossy = await improveCard(parsed, null, { name: 's', model: 's', async chat() {
+    return JSON.stringify({ fields: { first_mes: { text: '*Wren looks up.* "Hello there."', why: 'x' } }, new_lorebook_entries: [], headline: 'x' });
+  } }, { plan: { ideas: [{ field: 'first_mes', title: 't', change: 'c', lorebook: false }], keep: [], keepQuotes: ideas.keepQuotes } });
+  assert.deepEqual(lossy.lostQuotes, ['Storm\'s coming, {{user}}.'], 'losing a protected line is reported');
+  console.log('✓ a rewrite that drops one of the card\'s protected exact lines is flagged');
+
+  // lorebook entries are ignored unless a chosen idea asked for a move
+  const noMove = await improveCard(parsed, null, rewriteProvider, { plan: { ideas: [{ ...ideas.ideas[0], lorebook: false }], keep: [], keepQuotes: [] } });
+  assert.equal(noMove.lorebookEntries.length, 0, 'entries nobody asked for are not accepted');
+  console.log('✓ lorebook entries are only accepted when you chose a lorebook move');
 }
 
 main().catch((err) => {

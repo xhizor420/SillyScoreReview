@@ -85,10 +85,48 @@ function splitGreetings(text) {
  * it, all of it survives. Rewriting a card must never be a way to silently lose
  * data the tool doesn't happen to model.
  */
-export function applyFieldsToRaw(raw, { fields = {}, name } = {}) {
+/**
+ * Appends lorebook entries to a V2/V3 card's character_book, creating the book
+ * if the card has none. Follows the Character Card V2 spec: every entry has
+ * keys, content, extensions ({}), enabled and insertion_order, and the book
+ * itself has entries and extensions. Existing entries — and any keys this tool
+ * doesn't know about — are never touched; the spec forbids destroying them.
+ */
+function appendLorebookEntries(data, entries) {
+  if (!entries?.length) return;
+  const book = data.character_book && typeof data.character_book === 'object' ? data.character_book : {};
+  if (!Array.isArray(book.entries)) book.entries = [];
+  if (!book.extensions || typeof book.extensions !== 'object') book.extensions = {};
+  let order = book.entries.reduce((m, e) => Math.max(m, Number(e?.insertion_order) || 0), 0);
+  let id = book.entries.reduce((m, e) => Math.max(m, Number(e?.id) || 0), 0);
+  for (const e of entries) {
+    book.entries.push({
+      id: ++id,
+      keys: e.keys,
+      secondary_keys: [],
+      content: e.content,
+      extensions: {},
+      enabled: true,
+      insertion_order: (order += 10),
+      case_sensitive: false,
+      selective: false,
+      constant: false,
+      name: e.keys[0],
+      // Not used in prompts (per the spec) — marks where the entry came from.
+      comment: 'Moved here from the card by SillyScoreReview',
+    });
+  }
+  data.character_book = book;
+}
+
+export function applyFieldsToRaw(raw, { fields = {}, name, lorebookEntries = [] } = {}) {
   const next = structuredClone(raw);
   const isV2 = next.data && typeof next.data === 'object';
   const target = isV2 ? next.data : next;
+  if (lorebookEntries.length) {
+    if (!isV2) throw new Error('This card is in the older V1 format, which has no lorebook. Save it without the lorebook entries.');
+    appendLorebookEntries(next.data, lorebookEntries);
+  }
 
   for (const field of SCORABLE_FIELDS) {
     if (!(field in fields)) continue;
@@ -161,8 +199,8 @@ export function writeCardToJson(raw) {
  * Produces the bytes for an edited card, picking the right container from the
  * filename so a .json card stays JSON and a .png card stays a PNG.
  */
-export function serializeCard({ filename, originalBuffer, raw, fields, name }) {
-  const merged = applyFieldsToRaw(raw, { fields, name });
+export function serializeCard({ filename, originalBuffer, raw, fields, name, lorebookEntries }) {
+  const merged = applyFieldsToRaw(raw, { fields, name, lorebookEntries });
   const bytes = filename.toLowerCase().endsWith('.json')
     ? writeCardToJson(merged)
     : writeCardToPng(originalBuffer, merged);

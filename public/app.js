@@ -1521,7 +1521,8 @@ function renderEditor() {
   const { id, name, source, headline, previousScore, rows } = editor;
   const improving = source === 'improve';
 
-  let html = `<h2>${improving ? 'Improved draft' : 'Edit card'}: ${escapeHtml(name)}</h2>`;
+  let html = `<h2>${improving ? 'Improved draft' : 'Edit card'}: ${escapeHtml(name)}</h2>${improving && editor.keepQuotes ? stepper(3) : ''}`;
+  html += `<div id="lostQuotes"></div>`;
 
   html += `<div class="editor-intro">`;
   if (improving) {
@@ -1557,6 +1558,21 @@ function renderEditor() {
       </div>`;
     })
     .join('');
+
+  if (editor.lorebook?.length) {
+    html += `<section class="lorebook-box">
+      <h3>New lorebook entries <span class="folder-hint">— moved out of the card, not deleted</span></h3>
+      <p class="folder-hint">Lorebook entries are only sent to the model when one of their keywords comes up in the
+      chat, so this text stops costing tokens every turn. Edit the keywords or the text, or remove an entry to leave
+      that text out. Existing lorebook entries are kept as they are.</p>
+      ${editor.lorebook.map((e, i) => `<div class="lore-entry" data-lore="${i}">
+        <label class="field-label">Keywords (comma-separated)</label>
+        <input type="text" data-lore-keys="${i}" value="${escapeHtml(e.keys)}" />
+        <textarea class="editor-text" data-lore-text="${i}" rows="4">${escapeHtml(e.content)}</textarea>
+        <div class="editor-row-actions"><button class="secondary" data-lore-remove="${i}">Remove this entry</button></div>
+      </div>`).join('')}
+    </section>`;
+  }
 
   html += `<div class="editor-footer">
     <label class="editor-check"><input type="checkbox" id="editorRescore" checked /> Score it after saving</label>
@@ -1602,6 +1618,7 @@ function renderEditor() {
       .map((w) => `<div class="editor-warning">⚠ ${escapeHtml(w)}</div>`)
       .join('');
     els.modalBody.querySelector(`[data-row="${i}"]`).classList.toggle('is-changed', row.after !== row.before);
+    renderLostQuotes();
   }
 
   rows.forEach((_, i) => {
@@ -1613,10 +1630,42 @@ function renderEditor() {
     });
   });
 
+  for (const input of els.modalBody.querySelectorAll('[data-lore-keys]')) {
+    input.addEventListener('input', () => { editor.lorebook[Number(input.dataset.loreKeys)].keys = input.value; renderLostQuotes(); });
+  }
+  for (const ta of els.modalBody.querySelectorAll('[data-lore-text]')) {
+    ta.addEventListener('input', () => { editor.lorebook[Number(ta.dataset.loreText)].content = ta.value; renderLostQuotes(); });
+  }
+  for (const b of els.modalBody.querySelectorAll('[data-lore-remove]')) {
+    b.addEventListener('click', () => {
+      editor.lorebook.splice(Number(b.dataset.loreRemove), 1);
+      renderEditor(); // field edits are already in editor.rows (kept in sync on every keystroke)
+    });
+  }
+  renderLostQuotes();
+
   els.modalBody.querySelector('[data-cancel]').addEventListener('click', () => openCard(id));
   for (const btn of els.modalBody.querySelectorAll('[data-save]')) {
     btn.addEventListener('click', () => saveEditor(btn.dataset.save));
   }
+}
+
+/**
+ * The card's protected exact lines that are no longer anywhere in it. Checked
+ * live, so restoring a line by hand clears the warning. Only lines that were in
+ * a field being rewritten can go missing — untouched fields keep theirs.
+ */
+function renderLostQuotes() {
+  const box = els.modalBody.querySelector('#lostQuotes');
+  if (!box || !editor?.keepQuotes?.length) return;
+  const after = editor.rows.map((r) => r.after).concat((editor.lorebook || []).map((e) => e.content)).join('\n');
+  const before = editor.rows.map((r) => r.before).join('\n');
+  const lost = editor.keepQuotes.filter((q) => before.includes(q) && !after.includes(q));
+  box.innerHTML = lost.length
+    ? `<div class="editor-warning tone-bad">⚠ ${lost.length === 1 ? 'A line you protected is' : `${lost.length} lines you protected are`} no longer in the card:
+        ${lost.map((q) => `<div class="lost-quote">“${escapeHtml(q)}”</div>`).join('')}
+        Revert the field it was in, or paste the line back.</div>`
+    : '';
 }
 
 async function saveEditor(mode) {
@@ -1625,13 +1674,16 @@ async function saveEditor(mode) {
   for (const row of editor.rows) {
     if (row.after !== row.before) changed[row.field] = row.after;
   }
-  if (!Object.keys(changed).length) {
+  const lorebookEntries = (editor.lorebook || [])
+    .map((e) => ({ keys: e.keys.split(',').map((k) => k.trim()).filter(Boolean), content: e.content.trim() }))
+    .filter((e) => e.keys.length && e.content);
+  if (!Object.keys(changed).length && !lorebookEntries.length) {
     msg.textContent = 'Nothing has changed yet — edit something, or Cancel.';
     return;
   }
   if (mode === 'replace' && !confirm(
     `Overwrite "${editor.name}" with this version?\n\n` +
-    `${Object.keys(changed).length} field(s) change. A copy of the current file is kept in Trash, so this is undoable.`,
+    `${Object.keys(changed).length} field(s) change${lorebookEntries.length ? `, ${lorebookEntries.length} lorebook entr${lorebookEntries.length === 1 ? 'y is' : 'ies are'} added` : ''}. A copy of the current file is kept in Trash, so this is undoable.`,
   )) return;
 
   const rescore = els.modalBody.querySelector('#editorRescore').checked;
@@ -1642,7 +1694,7 @@ async function saveEditor(mode) {
     const res = await api(`/api/cards/${encodeURIComponent(editor.id)}/save`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ fields: changed, mode, rescore }),
+      body: JSON.stringify({ fields: changed, mode, rescore, lorebookEntries }),
     });
     await loadCards();
 
@@ -1669,29 +1721,178 @@ async function saveEditor(mode) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Improve with AI, step 1 of 2: choose what to change.
+//
+// The model reads the card and its rating, names what makes the card itself
+// (the keep list — kept in any rewrite, and editable here), and proposes
+// specific changes. You tick the ones you want. Only those changes are made,
+// and only the fields they touch are even sent for rewriting.
+// ---------------------------------------------------------------------------
+
+let ideasState = null; // { id, name, previousScore, hadCritique, keep, keepQuotes, ideas, chosen:Set }
+
+function stepper(active) {
+  const steps = ['Rating', 'Choose ideas', 'Review rewrite'];
+  return `<ol class="stepper">${steps.map((s, i) =>
+    `<li class="${i + 1 === active ? 'is-active' : i + 1 < active ? 'is-done' : ''}">${i + 1}. ${s}</li>`).join('')}</ol>`;
+}
+
 async function startImprove(id, name) {
-  els.modalBody.innerHTML = `<h2>${escapeHtml(name)}</h2>
-    <p class="editor-working">Asking the model to rewrite the weak fields…</p>
-    <p class="folder-hint">This is one request and takes about as long as scoring a card. Nothing is saved
-    until you review it.</p>`;
+  els.modalBody.innerHTML = `<h2>Improve: ${escapeHtml(name)}</h2>${stepper(2)}
+    <p class="editor-working">Reading the card and its rating, and drafting ideas…</p>
+    <p class="folder-hint">One request. Nothing is rewritten in this step.</p>`;
   try {
-    const data = await api(`/api/cards/${encodeURIComponent(id)}/improve`, { method: 'POST' });
-    editor = {
+    const data = await api(`/api/cards/${encodeURIComponent(id)}/ideas`, { method: 'POST' });
+    ideasState = {
       id,
+      name: data.name,
+      previousScore: data.previousScore,
+      hadCritique: data.hadCritique,
+      lorebookSupported: data.lorebookSupported,
+      keep: data.keep,
+      keepQuotes: data.keepQuotes,
+      ideas: data.ideas,
+      // Pre-tick what is clearly worth it and doesn't risk the card's feel.
+      chosen: new Set(data.ideas.filter((i) => i.impact !== 'low' && !i.risk).map((i) => i.id)),
+    };
+    renderIdeas();
+  } catch (err) {
+    showImproveError(id, name, err);
+  }
+}
+
+function showImproveError(id, name, err) {
+  els.modalBody.innerHTML = `<h2>${escapeHtml(name)}</h2>
+    <p style="color:var(--red)">Could not improve this card: ${escapeHtml(err.message)}</p>`;
+  const back = document.createElement('button');
+  back.textContent = 'Back to the card';
+  back.addEventListener('click', () => openCard(id));
+  els.modalBody.appendChild(back);
+}
+
+function renderIdeas() {
+  const st = ideasState;
+  const impactLabel = { high: 'High impact', medium: 'Medium', low: 'Low' };
+
+  let html = `<h2>Improve: ${escapeHtml(st.name)}</h2>${stepper(2)}`;
+  if (!st.hadCritique) {
+    html += `<div class="partial-note">This card has no full critique yet, so these ideas are based on the text alone.
+      For ideas aimed at what the rating found, close this and press <b>Rescore with full critique</b> first.</div>`;
+  }
+  html += `<p class="folder-hint">Tick the changes you want. Only those are made, only the fields they touch are
+    sent for rewriting, and everything on the keep list below is treated as untouchable. You review the result
+    before anything is saved.</p>`;
+
+  html += `<section class="keep-box">
+    <h3>What makes this card itself — kept in any rewrite</h3>
+    <p class="folder-hint">One per line. Add anything you want protected, or remove anything you're happy to change.</p>
+    <textarea id="keepText" rows="${Math.min(8, Math.max(3, st.keep.length + 1))}" spellcheck="true">${escapeHtml(st.keep.join('\n'))}</textarea>
+    ${st.keepQuotes.length ? `<p class="folder-hint">Exact lines that must survive word for word (checked after the rewrite):</p>
+      <ul class="quote-list">${st.keepQuotes.map((q, i) => `<li><span>“${escapeHtml(q)}”</span>
+        <button class="secondary small" data-unquote="${i}" title="Stop protecting this line">✕</button></li>`).join('')}</ul>` : ''}
+  </section>`;
+
+  html += `<section class="ideas-list"><h3>Ideas <span class="folder-hint" id="ideasCount"></span></h3>`;
+  html += st.ideas.map((idea) => `
+    <label class="idea ${st.chosen.has(idea.id) ? 'is-chosen' : ''}" data-idea="${escapeHtml(idea.id)}">
+      <input type="checkbox" ${st.chosen.has(idea.id) ? 'checked' : ''} />
+      <div class="idea-body">
+        <div class="idea-head">
+          <b>${escapeHtml(idea.title)}</b>
+          <span class="pill">${escapeHtml(fieldLabel(idea.field))}</span>
+          <span class="pill impact-${escapeHtml(idea.impact)}">${escapeHtml(impactLabel[idea.impact] || idea.impact)}</span>
+          ${idea.lorebook ? '<span class="pill tone-accent" title="Moves text into a lorebook entry instead of deleting it">→ lorebook</span>' : ''}
+        </div>
+        <div class="idea-change">${escapeHtml(idea.change)}</div>
+        ${idea.why ? `<div class="field-sub"><b>Fixes:</b> ${escapeHtml(idea.why)}</div>` : ''}
+        ${idea.risk ? `<div class="idea-risk">⚠ Could change the feel: ${escapeHtml(idea.risk)}</div>` : ''}
+      </div>
+    </label>`).join('');
+  html += `</section>`;
+
+  html += `<div class="editor-footer">
+    <div class="editor-buttons">
+      <button id="rewriteBtn" class="primary">Rewrite</button>
+      <button class="secondary" id="ideasAllBtn">Tick all</button>
+      <button class="secondary" id="ideasBackBtn">Back to the card</button>
+    </div>
+    <p id="ideasMsg" class="folder-hint"></p>
+  </div>`;
+  els.modalBody.innerHTML = html;
+
+  const refresh = () => {
+    const n = st.chosen.size;
+    els.modalBody.querySelector('#ideasCount').textContent = `${n} of ${st.ideas.length} ticked`;
+    const btn = els.modalBody.querySelector('#rewriteBtn');
+    btn.disabled = n === 0;
+    btn.textContent = n ? `Rewrite with ${n} chosen idea${n === 1 ? '' : 's'}` : 'Tick at least one idea';
+    const fields = new Set(st.ideas.filter((i) => st.chosen.has(i.id)).map((i) => fieldLabel(i.field)));
+    els.modalBody.querySelector('#ideasMsg').textContent = n
+      ? `Will rewrite: ${[...fields].join(', ')}. Everything else in the card is left exactly as it is.`
+      : '';
+  };
+
+  for (const label of els.modalBody.querySelectorAll('.idea')) {
+    const box = label.querySelector('input');
+    box.addEventListener('change', () => {
+      const idv = label.dataset.idea;
+      if (box.checked) st.chosen.add(idv); else st.chosen.delete(idv);
+      label.classList.toggle('is-chosen', box.checked);
+      refresh();
+    });
+  }
+  for (const b of els.modalBody.querySelectorAll('[data-unquote]')) {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      st.keep = keepFromText();
+      st.keepQuotes.splice(Number(b.dataset.unquote), 1);
+      renderIdeas();
+    });
+  }
+  els.modalBody.querySelector('#ideasAllBtn').addEventListener('click', () => {
+    st.keep = keepFromText();
+    st.ideas.forEach((i) => st.chosen.add(i.id));
+    renderIdeas();
+  });
+  els.modalBody.querySelector('#ideasBackBtn').addEventListener('click', () => openCard(st.id));
+  els.modalBody.querySelector('#rewriteBtn').addEventListener('click', runRewrite);
+  refresh();
+}
+
+function keepFromText() {
+  const ta = els.modalBody.querySelector('#keepText');
+  return (ta ? ta.value : ideasState.keep.join('\n')).split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
+async function runRewrite() {
+  const st = ideasState;
+  st.keep = keepFromText();
+  const chosen = st.ideas.filter((i) => st.chosen.has(i.id));
+  els.modalBody.innerHTML = `<h2>Improve: ${escapeHtml(st.name)}</h2>${stepper(3)}
+    <p class="editor-working">Rewriting with ${chosen.length} chosen idea${chosen.length === 1 ? '' : 's'}…</p>
+    <p class="folder-hint">Only ${escapeHtml([...new Set(chosen.map((i) => fieldLabel(i.field)))].join(', '))}
+    ${chosen.length === 1 ? 'is' : 'are'} sent. Nothing is saved until you review it.</p>`;
+  try {
+    const data = await api(`/api/cards/${encodeURIComponent(st.id)}/improve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ideas: chosen, keep: st.keep, keepQuotes: st.keepQuotes }),
+    });
+    editor = {
+      id: st.id,
       name: data.name,
       source: 'improve',
       headline: data.headline,
       previousScore: data.previousScore,
       rows: rowsFromProposal(data),
+      lorebook: (data.lorebookEntries || []).map((e) => ({ keys: e.keys.join(', '), content: e.content })),
+      lostQuotes: data.lostQuotes || [],
+      keepQuotes: st.keepQuotes,
     };
     renderEditor();
   } catch (err) {
-    els.modalBody.innerHTML = `<h2>${escapeHtml(name)}</h2>
-      <p style="color:var(--red)">Could not improve this card: ${escapeHtml(err.message)}</p>`;
-    const back = document.createElement('button');
-    back.textContent = 'Back to the card';
-    back.addEventListener('click', () => openCard(id));
-    els.modalBody.appendChild(back);
+    showImproveError(st.id, st.name, err);
   }
 }
 

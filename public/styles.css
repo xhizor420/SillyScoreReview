@@ -348,6 +348,48 @@ body.density-compact .card-meta { font-size: 10px; }
 .try-it select { width: 100%; }
 .test-result .overall-block { margin-top: 8px; }
 
+/* --- improve: steps, keep list, ideas, lorebook moves --- */
+.stepper { display: flex; gap: 6px; list-style: none; padding: 0; margin: 4px 0 14px; flex-wrap: wrap; }
+.stepper li {
+  font-size: 11.5px; padding: 3px 10px; border-radius: 12px;
+  background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border);
+}
+.stepper li.is-done { color: var(--green); border-color: rgba(79,191,122,0.4); }
+.stepper li.is-active { color: var(--text); border-color: var(--accent); background: rgba(124,156,255,0.12); font-weight: 700; }
+
+.keep-box, .lorebook-box {
+  margin: 12px 0; padding: 12px; border-radius: 8px;
+  background: var(--panel-2); border: 1px solid var(--border);
+}
+.keep-box h3, .lorebook-box h3, .ideas-list h3 { margin: 0 0 4px; font-size: 13.5px; }
+.keep-box textarea, .lorebook-box input {
+  width: 100%; padding: 8px 10px; background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical;
+}
+.quote-list { list-style: none; padding: 0; margin: 6px 0 0; }
+.quote-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; font-size: 12.5px; font-style: italic; }
+button.small { padding: 2px 8px; font-size: 11px; }
+
+.ideas-list { margin-top: 14px; }
+.idea {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; margin-top: 8px;
+  border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: var(--panel);
+}
+.idea:hover { border-color: var(--accent); }
+.idea.is-chosen { border-color: var(--accent); background: rgba(124,156,255,0.07); }
+.idea input { margin-top: 3px; width: 18px; height: 18px; flex-shrink: 0; }
+.idea-body { min-width: 0; }
+.idea-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.idea-change { margin-top: 4px; font-size: 13px; }
+.idea-risk { margin-top: 6px; font-size: 12px; color: var(--yellow); }
+.pill.impact-high { background: rgba(79,191,122,0.15); color: var(--green); }
+.pill.impact-medium { background: rgba(124,156,255,0.15); color: var(--accent); }
+.pill.impact-low { background: var(--panel-2); color: var(--text-dim); }
+
+.lore-entry { padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--border); }
+.lore-entry:first-of-type { border-top: 0; margin-top: 4px; padding-top: 0; }
+.lost-quote { margin: 4px 0 4px 12px; font-style: italic; }
+
 .grid-more {
   display: block; width: calc(100% - 40px); margin: 0 20px 20px;
   padding: 12px; font-size: 13px;
@@ -605,6 +647,9 @@ body.select-mode .card-checkbox { width: 26px; height: 26px; }
   .trash-header button { min-height: 42px; padding: 0 14px; }   /* every panel's Close, thumb-sized */
   .prompt-actions button { flex: 1 1 45%; min-height: 44px; }
   .tab { min-height: 42px; }
+  .idea { padding: 12px; }
+  .idea input { width: 22px; height: 22px; }
+  button.small { min-height: 42px; min-width: 42px; padding: 0 12px; }
   .modal { padding: 16px; }
   .modal-actions { flex-wrap: wrap; }
   .modal-actions button { min-height: 44px; flex: 1 1 45%; }

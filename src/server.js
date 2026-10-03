@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from './llmClient.js';
 import { scoreCard, buildScoringPrompts } from './scorer.js';
-import { improveCard, buildImprovePrompts } from './improver.js';
+import { improveCard, buildImprovePrompts, generateIdeas, buildIdeasPrompts } from './improver.js';
 import {
   PROMPT_KINDS, DEFAULT_PROMPTS, instructionsFor, systemPrompt, promptHash,
   validateInstructions, adviseInstructions,
@@ -275,6 +275,27 @@ export async function startServer(config) {
     }
   });
 
+  // Step 1 of improving a card: what makes it itself (kept in any rewrite) and
+  // a menu of specific changes to choose from. Nothing is written.
+  app.post('/api/cards/:id/ideas', async (req, res) => {
+    const file = req.params.id;
+    try {
+      const store = await getStore(config.charactersDir);
+      const { card } = await readCardOrThrow(file);
+      const entry = store.get(file);
+      const ideas = await generateIdeas(card, entry?.result, getProvider(), { prompts: config.prompts });
+      res.json({
+        id: file,
+        name: card.name,
+        previousScore: entry?.result?.overall_score ?? null,
+        hadCritique: Boolean(entry?.result && !entry.result.partial && !entry.result.brief),
+        ...ideas,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message, kind: classifyError(err.message) });
+    }
+  });
+
   // Ask the model to rewrite the weak parts of a card, informed by its own
   // critique. Nothing is written here: the proposal comes back for review (and
   // hand-editing) first, because an unreviewed automatic rewrite of someone's
@@ -287,7 +308,15 @@ export async function startServer(config) {
       const entry = store.get(file);
       const provider = getProvider();
       const fields = Array.isArray(req.body?.fields) && req.body.fields.length ? req.body.fields : null;
-      const proposal = await improveCard(card, entry?.result, provider, { fields, prompts: config.prompts });
+      // The ideas the owner ticked, plus the keep list (possibly edited by them).
+      const plan = Array.isArray(req.body?.ideas) && req.body.ideas.length
+        ? {
+            ideas: req.body.ideas,
+            keep: Array.isArray(req.body.keep) ? req.body.keep.map(String).filter(Boolean) : [],
+            keepQuotes: Array.isArray(req.body.keepQuotes) ? req.body.keepQuotes.map(String).filter(Boolean) : [],
+          }
+        : null;
+      const proposal = await improveCard(card, entry?.result, provider, { fields, prompts: config.prompts, plan });
       const before = {};
       for (const field of Object.keys(proposal.fields)) before[field] = card.fields[field] || '';
       res.json({
@@ -321,7 +350,16 @@ export async function startServer(config) {
   app.post('/api/cards/:id/save', async (req, res) => {
     const file = req.params.id;
     const { fields = {}, name, mode = 'new', rescore = false } = req.body || {};
-    if (!fields || typeof fields !== 'object' || !Object.keys(fields).length) {
+    const lorebookEntries = Array.isArray(req.body?.lorebookEntries)
+      ? req.body.lorebookEntries
+          .map((e) => ({
+            keys: (Array.isArray(e?.keys) ? e.keys : String(e?.keys ?? '').split(','))
+              .map((k) => String(k).trim()).filter(Boolean),
+            content: String(e?.content ?? '').trim(),
+          }))
+          .filter((e) => e.keys.length && e.content)
+      : [];
+    if (!fields || typeof fields !== 'object' || (!Object.keys(fields).length && !lorebookEntries.length)) {
       return res.status(400).json({ error: 'No edited fields were sent' });
     }
     if (mode !== 'new' && mode !== 'replace') {
@@ -333,7 +371,7 @@ export async function startServer(config) {
       const { buf, card } = await readCardOrThrow(file);
       const previousScore = store.get(file)?.result?.overall_score ?? null;
 
-      const { bytes } = serializeCard({ filename: file, originalBuffer: buf, raw: card.raw, fields, name });
+      const { bytes } = serializeCard({ filename: file, originalBuffer: buf, raw: card.raw, fields, name, lorebookEntries });
 
       let targetFile = file;
       let backedUpAs = null;
@@ -1049,9 +1087,12 @@ export async function startServer(config) {
       if (!file) return res.status(400).json({ error: 'There are no cards in this folder to preview with.' });
       const { card } = await readCardOrThrow(file);
       const store = await getStore(config.charactersDir);
+      const result = store.get(file)?.result;
       const built = kind === 'improve'
-        ? buildImprovePrompts(card, store.get(file)?.result, { prompts: config.prompts, draftInstructions: instructions })
-        : buildScoringPrompts(card, config.weights, { detail: kind, prompts: config.prompts, draftInstructions: instructions });
+        ? buildImprovePrompts(card, result, { prompts: config.prompts, draftInstructions: instructions })
+        : kind === 'ideas'
+          ? buildIdeasPrompts(card, result, { prompts: config.prompts, draftInstructions: instructions })
+          : buildScoringPrompts(card, config.weights, { detail: kind, prompts: config.prompts, draftInstructions: instructions });
       res.json({
         cardId: file,
         cardName: card.name,
@@ -1084,6 +1125,8 @@ export async function startServer(config) {
       let output;
       if (kind === 'improve') {
         output = await improveCard(card, store.get(file)?.result, provider, { prompts: config.prompts, draftInstructions: instructions });
+      } else if (kind === 'ideas') {
+        output = await generateIdeas(card, store.get(file)?.result, provider, { prompts: config.prompts, draftInstructions: instructions });
       } else {
         output = await scoreCard(card, provider, { weights: config.weights, detail: kind, prompts: config.prompts, draftInstructions: instructions });
       }
