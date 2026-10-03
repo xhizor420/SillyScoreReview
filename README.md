@@ -274,17 +274,21 @@ prompt dramatically as well. Full mode still critiques them.
 simulated API that decodes at a fixed tokens/second — because that is what an LLM's
 latency actually tracks:
 
-| | output per card | 3,765 cards |
+| 3,765 cards | quick model (40 tok/s) | slower model (12 tok/s) |
 |---|---|---|
-| full critique, 8 parallel (the old default) | 432 tokens | 1.6 h |
-| full critique, 10 parallel | 432 tokens | 1.3 h |
-| fast mode, 10 parallel | 27 tokens | 1.0 h |
+| full critique, 8 parallel (the old default) | 1.6 h | 5.0 h |
+| full critique, 10 parallel (new default) | 1.3 h | 4.1 h |
+| **fast mode, 10 parallel** | **1.0 h** | **1.1 h** |
+| | 1.5x faster | **4.5x faster** |
 
-The gap widens the slower your model is, because fast mode spends almost no time
-decoding. One thing to know: once answers get short, the **60 requests/minute** cap
-becomes the limit rather than the model, which puts the hard ceiling at **3,600
-cards/hour** however fast everything else gets. That is NanoGPT's published rule and the
-scanner paces itself to stay inside it.
+The slower your model, the more fast mode is worth — it barely decodes anything, so the
+model's speed stops mattering much. If a scan has been taking you many hours, this is
+the setting that fixes it.
+
+One thing to know: once answers get short, the **60 requests/minute** cap becomes the
+limit rather than the model, which puts the hard ceiling at **3,600 cards/hour** however
+fast everything else gets. That is NanoGPT's published rule and the scanner paces itself
+to stay inside it — which is why both columns land at about an hour.
 
 ## Scan crawling? Run `doctor` first
 
