@@ -51,7 +51,7 @@ recomputed from the card file, so `scan` treats them like any other scored card.
 score number survives; the written critique was never in the page, so those cards show
 their score with a note and can be rescored individually if you want the detail back.
 
-To avoid needing this again, the dashboard now has an **Export scores** button that saves
+To avoid needing this again, the dashboard has an **Export scores** option (under **More**) that saves
 the same JSON on demand — worth doing after a long run. `import-scores` restores it.
 
 ## Selecting a lot of cards quickly
@@ -109,6 +109,58 @@ filename is copied as `Name (2).png` so both survive.
 Scores travel with the copies. The destination folder gets its own score cache entries
 for the cards you copied, so pointing the dashboard at that folder later shows the same
 scores instead of demanding a rescan.
+
+## The dashboard at a glance
+
+- **Top bar** — the one thing you do most, **Scan unscored**, is the highlighted button.
+  **Prompts** and **Settings** sit next to it; everything occasional (Rescore all, Export
+  scores, Change folder, Trash) is under **More**.
+- **Stat tiles** — cards, scored, average, not scored yet, failed, and *older prompt*
+  (see below). Click any tile that names a set of cards to show just those.
+- **Score distribution** — one bar per score (1.0–1.9, 2.0–2.9, … 10). It answers "how many
+  would I lose if I cut everything below 4?" at a glance. **Click a bar to show only those
+  cards**, click it again to show everything. Hover (or tab to it) for the exact count.
+- **Large / Compact** — compact shows about twice as many cards at once (measured: 22 vs 8
+  fully on screen at 1400×900, 45 vs 22 at 1920×1080), for working through a big library.
+  Remembered between visits.
+- On a phone the controls collapse to a few short rows, so the cards start well up the
+  screen instead of below six stacked buttons.
+
+## Changing the prompts
+
+**Prompts** shows what the model is told, as three tabs:
+
+| | used for |
+|---|---|
+| **Full critique** | scoring with written feedback — your original rubric |
+| **Fast scoring** | scoring when *Scoring detail* is set to Fast |
+| **Improve card** | *Improve with AI* |
+
+Each prompt has two parts. **Your instructions** are fully editable — a different
+rubric, stricter or kinder grading, a genre focus ("judge these as horror cards"),
+feedback in another language. The **response format** — the exact shape the code reads
+back — is shown underneath but locked, and always added after your instructions. That
+lock is deliberate: if a single edit could change the format, one stray word would make
+every card in a 3,000-card scan fail to parse.
+
+Before saving, try an edit on one card:
+
+- **Show exactly what's sent** — the full system and user message for that card, with
+  your unsaved edit. Sends nothing.
+- **Test on this card** — sends one real request with your unsaved edit and shows the
+  result next to the card's current score ("Currently 7/10 — this version scores it
+  −5"). Nothing is saved to the card.
+
+The editor also warns you about edits that are allowed but probably not meant: writing
+your own JSON format (it would conflict with the locked one), asking fast mode for written
+feedback (it never returns any), lenient grading (it bunches scores up, which makes
+culling harder), or instructions long enough to noticeably slow down a big scan.
+
+**Changing a prompt never rescores anything by itself.** Every score remembers which
+prompt produced it, so after you save, an **older prompt** tile appears with a count, and
+the filter **Scored with an older prompt** shows just those cards — rescore them with
+**Select all shown → Score selected**, or leave them. **Reset to default** puts the
+built-in prompt back. Edits are saved to `config.json` under `prompts`.
 
 ## Improving a card
 
@@ -359,7 +411,7 @@ processed too.
 4. In the browser: click **Settings**, pick **NanoGPT** as the provider, paste your API
    key from [nano-gpt.com](https://nano-gpt.com), click **Save settings**, then **Refresh
    list** and pick a model from the dropdown, then **Save settings** again.
-5. Click **Change folder** and browse to wherever you put your card PNGs (e.g. your
+5. Click **More → Change folder** and browse to wherever you put your card PNGs (e.g. your
    SillyTavern `data/default-user/characters` folder). Click **Use this folder**.
 6. Click **Scan unscored**. Sort by **Score: low → high** once it's done to find your
    worst cards first.
@@ -426,7 +478,7 @@ node src/cli.js serve
 ```
 
 Then open `http://localhost:4180` and use the **Settings** panel (provider, API key,
-model) and **Change folder** button (your characters folder) instead of hand-editing
+model) and **More → Change folder** (your characters folder) instead of hand-editing
 `config.json` — both save back to the file automatically. Settings panel fields:
 
 - **Provider** — NanoGPT (default), Anthropic, OpenAI, or Local/other OpenAI-compatible
@@ -517,7 +569,7 @@ Open `http://localhost:4180`. From there:
   obvious before it sweeps up good cards. You can still tick individual checkboxes
   (top-left of each tile) for one-off picks.
   Deleting moves the PNG/JSON files to `data/trash/`; it does not permanently delete
-  them. Use the **Trash** panel to restore a card or permanently empty the trash.
+  them. Use **More → Trash** to restore a card or permanently empty the trash.
 - **Scan unscored** / **Rescore all** trigger a batch job in the background and open a
   live panel showing: how many cards **scored** vs **failed** (counted separately, so a
   failing run can't masquerade as a slow one), how many requests are **in flight** right
@@ -565,7 +617,7 @@ for tens of minutes per card.
 ## Picking the characters folder from the dashboard
 
 You don't have to hand-edit `config.json` to point at your cards. In the dashboard,
-click **Change folder** — it opens a server-side directory browser (click into
+click **More → Change folder** — it opens a server-side directory browser (click into
 subfolders, or paste a full path and hit Go) so you can navigate to wherever your
 `characters` folder actually lives and click **Use this folder**. This works even when
 the browser and the files are on different machines (see the Tailscale section below),

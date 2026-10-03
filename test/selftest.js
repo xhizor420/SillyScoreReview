@@ -430,6 +430,7 @@ async function main() {
   await testFastScoring();
   await testCoalescedWrites();
   await testRunSupervision();
+  await testEditablePrompts();
 
   console.log('\nAll self-tests passed.');
 }
@@ -1324,6 +1325,48 @@ async function testRunSupervision() {
     fake.close();
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Editable prompts. The instructions are yours to change; the response format
+ * the parser depends on is locked and always appended, so no edit can turn a
+ * 3,000-card scan into 3,000 parse failures.
+ */
+async function testEditablePrompts() {
+  const P = await import('../src/prompts.js');
+  const { scoreCard, FULL_SYSTEM_PROMPT } = await import('../src/scorer.js');
+
+  assert.equal(P.systemPrompt('full', {}), FULL_SYSTEM_PROMPT, 'with no edits, the prompt is exactly the one always sent');
+  console.log('✓ with no edits, every prompt is byte-for-byte what was sent before');
+
+  const custom = { full: 'Grade like a strict horror-fiction editor. Atmosphere matters most.' };
+  const sent = P.systemPrompt('full', custom);
+  assert.ok(sent.startsWith(custom.full), 'the edited instructions are what the model reads first');
+  assert.ok(sent.includes(P.PROMPT_KINDS.full.format), 'the locked response format is always appended');
+  assert.notEqual(P.promptHash(sent), P.promptHash(FULL_SYSTEM_PROMPT), 'a changed prompt has a different fingerprint');
+  console.log('✓ an edit replaces the instructions only; the response format is still appended');
+
+  assert.ok(P.validateInstructions('full', '   ').length > 0, 'empty instructions are refused');
+  assert.ok(P.validateInstructions('full', 'x'.repeat(P.MAX_INSTRUCTIONS_CHARS + 1)).length > 0, 'runaway length is refused');
+  assert.ok(P.adviseInstructions('full', 'Reply as {"fields": ...}').length > 0, 'describing JSON yourself earns a warning');
+  assert.ok(P.adviseInstructions('fast', 'Also explain the weaknesses.').length > 0, 'asking fast mode for prose earns a warning');
+  console.log('✓ empty or runaway instructions are refused; conflicting ones get a warning');
+
+  // The parser keeps working whatever the instructions say.
+  const seen = [];
+  const provider = {
+    name: 'stub', model: 'stub',
+    async chat({ system }) {
+      seen.push(system);
+      return JSON.stringify({ fields: { description: 3 }, overall_score: 3 });
+    },
+  };
+  const card = { name: 'Prompted', fields: { description: 'Some text.' } };
+  const r = await scoreCard(card, provider, { detail: 'fast', prompts: { fast: 'Be extremely harsh about clichés.' } });
+  assert.ok(seen[0].startsWith('Be extremely harsh about clichés.'));
+  assert.equal(r.overall_score, 3);
+  assert.equal(r.promptHash, P.promptHash(seen[0]), 'each score records the prompt that produced it');
+  console.log('✓ scores made with an edited prompt parse normally and record which prompt made them');
 }
 
 main().catch((err) => {

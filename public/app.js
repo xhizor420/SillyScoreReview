@@ -11,6 +11,8 @@ const state = {
   lastToggledIndex: null, // anchor for shift-click range selection
   selectMode: false,      // touch: tap a tile to select rather than open it
   renderLimit: 0,         // how many of state.shown are actually built as DOM
+  scoreBucket: null,      // 1-10: show only cards scoring in [n, n+1) — set by the distribution chart
+  charactersDir: '',      // the folder being reviewed (the header label is display-only)
 };
 
 const els = {
@@ -31,6 +33,14 @@ const els = {
   scanStats: document.getElementById('scanStats'),
   hideScanPanelBtn: document.getElementById('hideScanPanelBtn'),
   stopScanBtn: document.getElementById('stopScanBtn'),
+  dist: document.getElementById('dist'),
+  distHint: document.getElementById('distHint'),
+  distTooltip: document.getElementById('distTooltip'),
+  moreBtn: document.getElementById('moreBtn'),
+  moreMenu: document.getElementById('moreMenu'),
+  promptsBtn: document.getElementById('promptsBtn'),
+  densityComfy: document.getElementById('densityComfy'),
+  densityCompact: document.getElementById('densityCompact'),
   scanBanner: document.getElementById('scanBanner'),
   scanBannerText: document.getElementById('scanBannerText'),
   resumeScanBtn: document.getElementById('resumeScanBtn'),
@@ -275,27 +285,145 @@ async function api(url, options = {}) {
 async function loadCards() {
   const data = await api('/api/cards');
   state.cards = data.cards;
-  els.dirLabel.textContent = data.charactersDir;
+  state.charactersDir = data.charactersDir;
+  // The label truncates from the left so the end of a long path (the folder
+  // that matters) stays visible. That needs right-to-left layout, which would
+  // otherwise move the leading "/" or "C:\\" to the far end — the LRM marks
+  // pin it in place. Code that needs the path reads state.charactersDir.
+  els.dirLabel.textContent = `\u200E${data.charactersDir}\u200E`;
+  els.dirLabel.title = data.charactersDir;
   computeGroups();   // once per load, not per render
   renderStats();
   renderGrid();
 }
 
+/**
+ * The numbers a culling session starts from, as a row of stat tiles. Each one
+ * that names a set of cards is also a shortcut to that set.
+ */
 function renderStats() {
   const total = state.cards.length;
-  const scored = state.cards.filter((c) => c.overallScore != null).length;
+  const scoredCards = state.cards.filter((c) => c.overallScore != null);
+  const scored = scoredCards.length;
   const errored = state.cards.filter((c) => c.error).length;
-  const avg = scored
-    ? (state.cards.reduce((s, c) => s + (c.overallScore || 0), 0) / scored).toFixed(2)
-    : '—';
-  els.stats.textContent = `${total} cards · ${scored} scored (avg ${avg}) · ${errored} errors`;
+  const unscored = state.cards.filter((c) => c.overallScore == null && !c.error).length;
+  const stale = state.cards.filter((c) => c.promptStale).length;
+  const avg = scored ? (scoredCards.reduce((sum, c) => sum + c.overallScore, 0) / scored).toFixed(1) : '—';
+
+  const tiles = [
+    { value: total.toLocaleString(), label: 'cards', filter: 'all' },
+    { value: scored.toLocaleString(), label: 'scored', filter: 'scored' },
+    { value: avg, label: 'average' },
+    { value: unscored.toLocaleString(), label: 'not scored yet', filter: 'unscored', hideIfZero: true },
+    { value: errored.toLocaleString(), label: 'failed', filter: 'unscored', tone: 'bad', hideIfZero: true },
+    { value: stale.toLocaleString(), label: 'older prompt', filter: 'prompt-stale', tone: 'warn', hideIfZero: true,
+      title: 'Scored before you changed the prompt. Filter to these to rescore just them.' },
+  ].filter((t) => !(t.hideIfZero && t.value === '0'));
+
+  els.stats.replaceChildren(...tiles.map((t) => {
+    const el = document.createElement(t.filter ? 'button' : 'div');
+    el.className = `stat ${t.tone ? `tone-${t.tone}` : ''}`;
+    if (t.title) el.title = t.title;
+    const b = document.createElement('b');
+    b.textContent = t.value;
+    const span = document.createElement('span');
+    span.textContent = t.label;
+    el.append(b, span);
+    if (t.filter) {
+      el.addEventListener('click', () => {
+        state.scoreBucket = null;
+        state.focusKey = null;
+        els.filterBy.value = t.filter;
+        renderGrid();
+        renderDistribution();
+      });
+    }
+    return el;
+  }));
+  renderDistribution();
+}
+
+/**
+ * How the scores are spread: one column per whole-number score (1.0-1.9,
+ * 2.0-2.9, … 9.0-10). Answers "how many cards would I lose below 4?" at a
+ * glance, and each column is a filter — click 3 to see exactly those cards.
+ *
+ * One hue throughout (magnitude, not identity). When a column is the active
+ * filter it keeps the hue and the rest recede to gray, so the selection reads
+ * without a legend. Colours were checked against this dashboard's dark surface
+ * (blue clears 3:1; the recessive gray was stepped up until it did too).
+ */
+function renderDistribution() {
+  const counts = new Array(10).fill(0);
+  for (const c of state.cards) {
+    if (c.overallScore == null) continue;
+    counts[Math.min(9, Math.max(0, Math.floor(c.overallScore) - 1))]++;
+  }
+  const max = Math.max(1, ...counts);
+  const active = state.scoreBucket;
+
+  els.dist.classList.toggle('has-active', active != null);
+  els.distHint.textContent = active != null
+    ? `showing ${counts[active - 1].toLocaleString()} card${counts[active - 1] === 1 ? '' : 's'} scoring ${active}.0–${active === 10 ? '10' : `${active}.9`} · click again to show all`
+    : 'click a bar to show just those cards';
+
+  els.dist.replaceChildren(...counts.map((n, i) => {
+    const bucket = i + 1;
+    const range = bucket === 10 ? '10' : `${bucket}.0–${bucket}.9`;
+    const btn = document.createElement('button');
+    btn.className = `dist-col${active === bucket ? ' is-active' : ''}`;
+    btn.type = 'button';
+    btn.setAttribute('aria-pressed', String(active === bucket));
+    btn.setAttribute('aria-label', `Score ${range}: ${n} card${n === 1 ? '' : 's'}. ${active === bucket ? 'Showing these — press to show all.' : 'Press to show only these.'}`);
+    const bar = document.createElement('span');
+    bar.className = 'dist-bar';
+    // A zero bucket keeps a hairline so the axis reads as continuous.
+    bar.style.height = n ? `${Math.max(4, Math.round((n / max) * 100))}%` : '1px';
+    const label = document.createElement('span');
+    label.className = 'dist-label';
+    label.textContent = String(bucket);
+    btn.append(bar, label);
+
+    const show = () => {
+      // Values lead, labels follow; built with textContent, never innerHTML.
+      const strong = document.createElement('b');
+      strong.textContent = `${n.toLocaleString()} card${n === 1 ? '' : 's'}`;
+      const sub = document.createElement('span');
+      sub.textContent = ` scored ${range}`;
+      els.distTooltip.replaceChildren(strong, sub);
+      els.distTooltip.classList.remove('hidden');
+      const r = btn.getBoundingClientRect();
+      const host = els.dist.closest('.overview').getBoundingClientRect();
+      els.distTooltip.style.left = `${Math.round(r.left - host.left + r.width / 2)}px`;
+      els.distTooltip.style.top = `${Math.round(r.top - host.top - 8)}px`;
+    };
+    const hide = () => els.distTooltip.classList.add('hidden');
+    btn.addEventListener('pointerenter', show);
+    btn.addEventListener('focus', show);
+    btn.addEventListener('pointerleave', hide);
+    btn.addEventListener('blur', hide);
+    btn.addEventListener('click', () => {
+      state.scoreBucket = state.scoreBucket === bucket ? null : bucket;
+      state.focusKey = null;
+      if (state.scoreBucket != null) els.filterBy.value = 'all';
+      renderGrid();
+      renderDistribution();
+    });
+    return btn;
+  }));
 }
 
 function passesFilter(card) {
   // Focusing one name group overrides the dropdown — you asked to see these
   // specific cards, so show all of them regardless of score/scored state.
   if (state.focusKey) return state.groupOf.get(card.id) === state.focusKey;
+  if (state.scoreBucket != null) {
+    if (card.overallScore == null) return false;
+    // Same bucketing as the chart: 3 means 3.0-3.9, and 10 means exactly 10.
+    return Math.min(10, Math.max(1, Math.floor(card.overallScore))) === state.scoreBucket;
+  }
   const f = els.filterBy.value;
+  if (f === 'prompt-stale') return card.promptStale === true;
   if (f === 'duplicates') return state.dupeIds.has(card.id);
   if (f === 'unscored') return card.overallScore == null || card.error;
   if (f === 'below4') return card.overallScore != null && card.overallScore < 4;
@@ -423,8 +551,11 @@ function appendTiles(cards, offset) {
     info.className = 'card-info';
     const name = document.createElement('div');
     name.className = 'card-name';
-    name.title = card.name;
-    name.textContent = card.name;
+    // A card not scored yet only has its filename to go on; drop the extension
+    // so the grid reads as names rather than a file listing.
+    const shownName = card.name.replace(/\.(png|json)$/i, '');
+    name.title = shownName;
+    name.textContent = shownName;
     const meta = document.createElement('div');
     meta.className = 'card-meta';
     meta.textContent = card.tokenEstimate != null ? `~${card.tokenEstimate} tok` : '';
@@ -900,7 +1031,9 @@ els.search.addEventListener('input', () => {
 els.sortBy.addEventListener('change', renderGrid);
 els.filterBy.addEventListener('change', () => {
   state.focusKey = null;
+  state.scoreBucket = null; // one filter at a time, so nothing is hidden by a filter you can't see
   renderGrid();
+  renderDistribution();
 });
 els.clearFocusBtn.addEventListener('click', clearFocus);
 els.selectFocusLosersBtn.addEventListener('click', () => {
@@ -909,6 +1042,44 @@ els.selectFocusLosersBtn.addEventListener('click', () => {
   }
   renderGrid();
 });
+
+// ---- "More" menu: the less frequent actions, out of the way of the main one ----
+function setMenu(open) {
+  els.moreMenu.classList.toggle('hidden', !open);
+  els.moreBtn.setAttribute('aria-expanded', String(open));
+  if (open) els.moreMenu.querySelector('button')?.focus();
+}
+els.moreBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setMenu(els.moreMenu.classList.contains('hidden'));
+});
+els.moreMenu.addEventListener('click', () => setMenu(false)); // picking an item closes it
+document.addEventListener('click', (e) => {
+  if (!els.moreMenu.classList.contains('hidden') && !e.target.closest('.menu')) setMenu(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !els.moreMenu.classList.contains('hidden')) {
+    setMenu(false);
+    els.moreBtn.focus();
+  }
+});
+
+// ---- card size: large art, or compact to see more of a big library at once ----
+function setDensity(mode, persist = true) {
+  document.body.classList.toggle('density-compact', mode === 'compact');
+  els.densityComfy.setAttribute('aria-pressed', String(mode !== 'compact'));
+  els.densityCompact.setAttribute('aria-pressed', String(mode === 'compact'));
+  if (persist) {
+    try { localStorage.setItem('ssr_density', mode); } catch { /* not persisted — fine */ }
+  }
+}
+els.densityComfy.addEventListener('click', () => setDensity('comfy'));
+els.densityCompact.addEventListener('click', () => setDensity('compact'));
+try {
+  setDensity(localStorage.getItem('ssr_density') || 'comfy', false);
+} catch {
+  setDensity('comfy', false);
+}
 
 els.scanUnscoredBtn.addEventListener('click', () => startBatch({ scope: 'unscored' }));
 els.rescanAllBtn.addEventListener('click', () => {
@@ -1001,7 +1172,7 @@ els.exportScoresBtn.addEventListener('click', () => {
     alert('No scored cards to export yet.');
     return;
   }
-  const payload = { exportedAt: new Date().toISOString(), charactersDir: els.dirLabel.textContent, scores };
+  const payload = { exportedAt: new Date().toISOString(), charactersDir: state.charactersDir, scores };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
   a.download = `sillyscorereview-scores-${new Date().toISOString().slice(0, 10)}.json`;
@@ -1085,7 +1256,7 @@ async function openFolderPanel(purpose, startAt) {
 }
 
 els.folderBtn.addEventListener('click', async () => {
-  await openFolderPanel('switch', els.dirLabel.textContent || undefined);
+  await openFolderPanel('switch', state.charactersDir || undefined);
 });
 els.closeFolderBtn.addEventListener('click', () => els.folderPanel.classList.add('hidden'));
 els.folderGoBtn.addEventListener('click', () => browseFolder(els.folderPathInput.value.trim()));
@@ -1121,7 +1292,7 @@ els.copySelectedBtn.addEventListener('click', async () => {
   if (state.selected.size === 0) return;
   // Start from the parent of the current library — the destination is almost
   // always a sibling folder ("keepers", "to fix"), not somewhere far away.
-  const start = currentBrowse?.path || els.dirLabel.textContent || undefined;
+  const start = currentBrowse?.path || state.charactersDir || undefined;
   await openFolderPanel('copy', start);
 });
 
@@ -1525,6 +1696,317 @@ function startManualEdit(id, name, fields) {
   editor = { id, name, source: 'manual', headline: '', previousScore: null, rows: rowsFromCard(fields) };
   renderEditor();
 }
+
+// ---------------------------------------------------------------------------
+// Prompts panel
+//
+// Edit what the model is told, per prompt (full critique, fast scoring,
+// improve). Drafts are kept per tab while the panel is open, so switching tabs
+// never throws away an edit. The locked response format is shown read-only.
+// ---------------------------------------------------------------------------
+
+const promptUi = {
+  kinds: [],          // from GET /api/prompts
+  active: 'full',
+  drafts: {},         // kind -> unsaved text
+  staleScores: 0,
+};
+
+const pels = {
+  panel: document.getElementById('promptsPanel'),
+  close: document.getElementById('closePromptsBtn'),
+  tabs: document.getElementById('promptTabs'),
+  description: document.getElementById('promptDescription'),
+  text: document.getElementById('promptText'),
+  state: document.getElementById('promptState'),
+  count: document.getElementById('promptCount'),
+  advice: document.getElementById('promptAdvice'),
+  format: document.getElementById('promptFormat'),
+  save: document.getElementById('savePromptBtn'),
+  discard: document.getElementById('discardPromptBtn'),
+  reset: document.getElementById('resetPromptBtn'),
+  msg: document.getElementById('promptMsg'),
+  card: document.getElementById('promptCard'),
+  preview: document.getElementById('previewPromptBtn'),
+  test: document.getElementById('testPromptBtn'),
+  output: document.getElementById('promptOutput'),
+  stale: document.getElementById('promptStale'),
+};
+
+function currentKind() {
+  return promptUi.kinds.find((k) => k.kind === promptUi.active);
+}
+
+function draftFor(kind) {
+  return promptUi.drafts[kind] ?? promptUi.kinds.find((k) => k.kind === kind)?.instructions ?? '';
+}
+
+function isDirty(kind) {
+  const k = promptUi.kinds.find((x) => x.kind === kind);
+  return k != null && promptUi.drafts[kind] != null && promptUi.drafts[kind] !== k.instructions;
+}
+
+function renderPromptTabs() {
+  pels.tabs.replaceChildren(...promptUi.kinds.map((k) => {
+    const b = document.createElement('button');
+    b.className = 'tab';
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(k.kind === promptUi.active));
+    b.textContent = k.label;
+    if (isDirty(k.kind)) {
+      const dot = document.createElement('span');
+      dot.className = 'tab-dot';
+      dot.title = 'Unsaved changes';
+      b.append(dot);
+    } else if (k.isCustom) {
+      const tag = document.createElement('span');
+      tag.className = 'tab-tag';
+      tag.textContent = 'edited';
+      b.append(tag);
+    }
+    b.addEventListener('click', () => {
+      promptUi.drafts[promptUi.active] = pels.text.value;
+      promptUi.active = k.kind;
+      pels.output.replaceChildren();
+      renderPromptEditor();
+    });
+    return b;
+  }));
+}
+
+let adviseTimer = null;
+function renderPromptMeta() {
+  const k = currentKind();
+  const text = pels.text.value;
+  const dirty = text !== k.instructions;
+  const custom = k.isCustom || text !== k.defaultInstructions;
+  pels.state.textContent = dirty ? 'unsaved changes' : custom ? 'edited' : 'default';
+  pels.state.className = `pill ${dirty ? 'tone-warn' : custom ? 'tone-accent' : ''}`;
+  pels.count.textContent = `${text.length.toLocaleString()} characters · ~${Math.ceil(text.length / 4).toLocaleString()} tokens sent with every card`;
+  pels.save.disabled = !dirty;
+  pels.discard.disabled = !dirty;
+  pels.reset.disabled = text === k.defaultInstructions && !k.isCustom;
+
+  // Advice comes from the server so the same rules apply as on save.
+  clearTimeout(adviseTimer);
+  adviseTimer = setTimeout(async () => {
+    try {
+      const r = await api('/api/prompts/advise', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: k.kind, instructions: pels.text.value }),
+      });
+      pels.advice.replaceChildren(
+        ...r.problems.map((t) => noteEl(t, 'bad')),
+        ...r.advice.map((t) => noteEl(t, 'warn')),
+      );
+    } catch {
+      // advice is a nicety
+    }
+  }, 250);
+}
+
+function noteEl(text, tone) {
+  const d = document.createElement('div');
+  d.className = `editor-warning tone-${tone}`;
+  d.textContent = `${tone === 'bad' ? '✕' : '⚠'} ${text}`;
+  return d;
+}
+
+function renderPromptEditor() {
+  const k = currentKind();
+  if (!k) return;
+  renderPromptTabs();
+  pels.description.textContent = k.description;
+  pels.text.value = draftFor(k.kind);
+  pels.format.textContent = k.format;
+  pels.msg.textContent = '';
+  // Only the scoring prompts can make a score "stale"; improve doesn't score.
+  pels.stale.textContent = k.kind !== 'improve' && promptUi.staleScores
+    ? `${promptUi.staleScores.toLocaleString()} existing score${promptUi.staleScores === 1 ? ' was' : 's were'} made with a different prompt than the one now saved. Filter to "Scored with an older prompt" to rescore just those — nothing is rescored automatically.`
+    : '';
+  renderPromptMeta();
+}
+
+function fillCardPicker() {
+  // Scored cards first (a test can then be compared with their current score),
+  // capped so a 3,000-card library doesn't build a 3,000-row dropdown.
+  const scored = state.cards.filter((c) => c.overallScore != null).sort((a, b) => a.name.localeCompare(b.name));
+  const rest = state.cards.filter((c) => c.overallScore == null).sort((a, b) => a.name.localeCompare(b.name));
+  const list = [...scored, ...rest].slice(0, 400);
+  const previous = pels.card.value;
+  pels.card.replaceChildren(...list.map((c) => {
+    const o = document.createElement('option');
+    o.value = c.id;
+    o.textContent = `${c.name.replace(/\.(png|json)$/i, '')}${c.overallScore != null ? ` — currently ${c.overallScore}/10` : ' — not scored yet'}`;
+    return o;
+  }));
+  if (previous && list.some((c) => c.id === previous)) pels.card.value = previous;
+}
+
+async function openPrompts(kind) {
+  pels.panel.classList.remove('hidden');
+  pels.msg.textContent = 'Loading…';
+  try {
+    const data = await api('/api/prompts');
+    promptUi.kinds = data.kinds;
+    promptUi.staleScores = data.staleScores;
+    if (kind) promptUi.active = kind;
+    fillCardPicker();
+    renderPromptEditor();
+  } catch (err) {
+    pels.msg.textContent = `Could not load prompts: ${err.message}`;
+  }
+}
+
+pels.text.addEventListener('input', () => {
+  promptUi.drafts[promptUi.active] = pels.text.value;
+  renderPromptMeta();
+  renderPromptTabs();
+});
+
+pels.close.addEventListener('click', () => {
+  promptUi.drafts[promptUi.active] = pels.text.value;
+  const unsaved = promptUi.kinds.filter((k) => isDirty(k.kind)).map((k) => k.label);
+  if (unsaved.length && !confirm(`Close without saving your changes to: ${unsaved.join(', ')}?`)) return;
+  promptUi.drafts = {};
+  pels.panel.classList.add('hidden');
+});
+
+async function savePrompt(body, doneMessage) {
+  pels.save.disabled = true;
+  try {
+    const saved = await api('/api/prompts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const i = promptUi.kinds.findIndex((k) => k.kind === saved.kind);
+    promptUi.kinds[i] = { ...promptUi.kinds[i], ...saved };
+    delete promptUi.drafts[saved.kind];
+    // A saved scoring prompt changes which scores count as "older prompt".
+    const fresh = await api('/api/prompts');
+    promptUi.staleScores = fresh.staleScores;
+    renderPromptEditor();
+    pels.msg.textContent = saved.persisted
+      ? doneMessage
+      : `${doneMessage} — but it could not be written to config.json (${saved.persistError}), so it lasts until the dashboard restarts.`;
+    await loadCards(); // refresh the "older prompt" counts on the dashboard
+  } catch (err) {
+    pels.msg.textContent = `Not saved: ${err.message}`;
+    renderPromptMeta();
+  }
+}
+
+pels.save.addEventListener('click', () => {
+  savePrompt({ kind: promptUi.active, instructions: pels.text.value },
+    'Saved. Scans and rescores from now on use this prompt; existing scores are left as they are.');
+});
+
+pels.discard.addEventListener('click', () => {
+  delete promptUi.drafts[promptUi.active];
+  renderPromptEditor();
+});
+
+pels.reset.addEventListener('click', () => {
+  const k = currentKind();
+  if (!confirm(`Put the ${k.label} prompt back to the built-in default? Your edited version will be lost.`)) return;
+  savePrompt({ kind: promptUi.active, reset: true }, 'Back to the default prompt.');
+});
+
+function outputBlock(title, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'field-block';
+  const h = document.createElement('div');
+  h.className = 'field-title';
+  h.textContent = title;
+  const pre = document.createElement('pre');
+  pre.className = 'card-field-text';
+  pre.textContent = text;
+  wrap.append(h, pre);
+  return wrap;
+}
+
+pels.preview.addEventListener('click', async () => {
+  pels.output.replaceChildren(noteEl('Building…', 'warn'));
+  try {
+    const r = await api('/api/prompts/preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: promptUi.active, instructions: pels.text.value, cardId: pels.card.value || undefined }),
+    });
+    const head = document.createElement('p');
+    head.className = 'folder-hint';
+    head.textContent = `Exactly what one request for "${r.cardName}" contains — about ${r.approxTokens.toLocaleString()} tokens. Nothing was sent.`;
+    pels.output.replaceChildren(head, outputBlock('System message (your instructions + the format)', r.system), outputBlock('User message (the card)', r.user));
+  } catch (err) {
+    pels.output.replaceChildren(noteEl(err.message, 'bad'));
+  }
+});
+
+pels.test.addEventListener('click', async () => {
+  pels.test.disabled = true;
+  pels.output.replaceChildren(noteEl('Sending one request…', 'warn'));
+  try {
+    const r = await api('/api/prompts/test', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: promptUi.active, instructions: pels.text.value, cardId: pels.card.value || undefined }),
+    });
+    pels.output.replaceChildren(renderTestResult(r));
+  } catch (err) {
+    pels.output.replaceChildren(noteEl(`The test request failed: ${err.message}`, 'bad'));
+  } finally {
+    pels.test.disabled = false;
+  }
+});
+
+function renderTestResult(r) {
+  const box = document.createElement('div');
+  box.className = 'test-result';
+  const head = document.createElement('p');
+  head.className = 'folder-hint';
+  head.textContent = `"${r.cardName}" · answered in ${(r.tookMs / 1000).toFixed(1)}s · nothing was saved to the card.`;
+  box.append(head);
+
+  const out = r.output;
+  if (promptUi.active === 'improve') {
+    const h = document.createElement('p');
+    h.textContent = out.headline || 'The model proposed these changes:';
+    box.append(h);
+    for (const [field, f] of Object.entries(out.fields)) {
+      box.append(outputBlock(`${field.replace(/_/g, ' ')} · ${f.tokensBefore} → ${f.tokensAfter} tok${f.why ? ` · ${f.why}` : ''}`, f.text));
+    }
+    return box;
+  }
+
+  const big = document.createElement('div');
+  big.className = 'overall-block';
+  const score = document.createElement('div');
+  score.className = 'overall-score';
+  score.textContent = `${out.overall_score} / 10`;
+  big.append(score);
+  if (r.currentScore != null) {
+    const cmp = document.createElement('div');
+    const diff = Math.round((out.overall_score - r.currentScore) * 10) / 10;
+    cmp.textContent = `Currently ${r.currentScore}/10 with the saved prompt — this version scores it ${diff === 0 ? 'the same' : `${diff > 0 ? '+' : ''}${diff}`}.`;
+    big.append(cmp);
+  }
+  if (out.summary) {
+    const sum = document.createElement('div');
+    sum.textContent = out.summary;
+    big.append(sum);
+  }
+  box.append(big);
+  for (const [field, f] of Object.entries(out.fields || {})) {
+    const lines = [f.strengths && `Strengths: ${f.strengths}`, f.weaknesses && `Weaknesses: ${f.weaknesses}`, f.suggestions && `Suggestions: ${f.suggestions}`].filter(Boolean);
+    box.append(outputBlock(`${field.replace(/_/g, ' ')} — ${f.score ?? '–'}/10`, lines.join('\n') || '(scores only)'));
+  }
+  return box;
+}
+
+els.promptsBtn.addEventListener('click', () => openPrompts());
 
 els.modalClose.addEventListener('click', closeModal);
 els.modalBackdrop.addEventListener('click', (e) => {

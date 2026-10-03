@@ -326,7 +326,9 @@ function createMockProvider() {
         });
       }
 
-      if (/senior editor for SillyTavern character cards/.test(system || '')) {
+      // Recognised by its locked response format, not its wording — the
+      // instructions part is user-editable and may say anything.
+      if (/"headline": "<one sentence on the overall change>"/.test(system || '')) {
         const originals = parseImprovePromptFields(user);
         const fields = {};
         for (const [field, text] of Object.entries(originals)) {

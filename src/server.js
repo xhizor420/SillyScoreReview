@@ -7,8 +7,12 @@ import { fileURLToPath } from 'node:url';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from './llmClient.js';
-import { scoreCard } from './scorer.js';
-import { improveCard } from './improver.js';
+import { scoreCard, buildScoringPrompts } from './scorer.js';
+import { improveCard, buildImprovePrompts } from './improver.js';
+import {
+  PROMPT_KINDS, DEFAULT_PROMPTS, instructionsFor, systemPrompt, promptHash,
+  validateInstructions, adviseInstructions,
+} from './prompts.js';
 import { serializeCard } from './cardWriter.js';
 import { Store, flushOnExit } from './store.js';
 import { runQueue } from './concurrency.js';
@@ -74,6 +78,19 @@ export async function startServer(config) {
     return sharedProvider;
   }
 
+  /**
+   * Was this score produced by a different prompt than the one now in effect?
+   * Scores from before prompts were editable carry no fingerprint; they were
+   * necessarily made with the default, so they are compared as such.
+   */
+  function isPromptStale(entry) {
+    const result = entry?.result;
+    if (!result || result.partial) return false;
+    const kind = result.brief ? 'fast' : 'full';
+    const used = result.promptHash ?? promptHash(DEFAULT_PROMPTS[kind]);
+    return used !== promptHash(systemPrompt(kind, config.prompts));
+  }
+
   function cardSummary(file, entry) {
     return {
       id: file,
@@ -86,6 +103,7 @@ export async function startServer(config) {
       previousScore: entry?.previousScore ?? null,
       improvedFrom: entry?.improvedFrom ?? null,
       brief: Boolean(entry?.result?.brief),
+      promptStale: isPromptStale(entry),
       isImage: /\.png$/i.test(file),
     };
   }
@@ -131,7 +149,7 @@ export async function startServer(config) {
     }
 
     try {
-      const result = await scoreCard(card, provider, { weights: config.weights, detail });
+      const result = await scoreCard(card, provider, { weights: config.weights, detail, prompts: config.prompts });
       const entry = {
         hash,
         name: card.name,
@@ -269,7 +287,7 @@ export async function startServer(config) {
       const entry = store.get(file);
       const provider = getProvider();
       const fields = Array.isArray(req.body?.fields) && req.body.fields.length ? req.body.fields : null;
-      const proposal = await improveCard(card, entry?.result, provider, { fields });
+      const proposal = await improveCard(card, entry?.result, provider, { fields, prompts: config.prompts });
       const before = {};
       for (const field of Object.keys(proposal.fields)) before[field] = card.fields[field] || '';
       res.json({
@@ -281,7 +299,7 @@ export async function startServer(config) {
         ...proposal,
       });
     } catch (err) {
-      res.status(500).json({ error: err.message, kind: classifyError(err).kind });
+      res.status(500).json({ error: err.message, kind: classifyError(err.message) });
     }
   });
 
@@ -950,6 +968,134 @@ export async function startServer(config) {
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ---- prompts: view, edit, preview, and try on a card before committing ----
+
+  function promptPayload(kind) {
+    const def = PROMPT_KINDS[kind];
+    const instructions = instructionsFor(kind, config.prompts);
+    return {
+      kind,
+      label: def.label,
+      description: def.description,
+      instructions,
+      defaultInstructions: def.defaultInstructions,
+      format: def.format,
+      isCustom: instructions !== def.defaultInstructions,
+      hash: promptHash(systemPrompt(kind, config.prompts)),
+    };
+  }
+
+  app.get('/api/prompts', async (req, res) => {
+    const kinds = Object.keys(PROMPT_KINDS).map(promptPayload);
+    // How many existing scores were made with something other than today's
+    // prompt — the number "Rescore stale" would cost.
+    let stale = 0;
+    try {
+      const store = await getStore(config.charactersDir);
+      stale = Object.values(store.all()).filter(isPromptStale).length;
+    } catch {
+      // no folder yet
+    }
+    res.json({ kinds, staleScores: stale });
+  });
+
+  app.post('/api/prompts/advise', (req, res) => {
+    const { kind, instructions } = req.body || {};
+    if (!PROMPT_KINDS[kind]) return res.status(400).json({ error: `Unknown prompt "${kind}"` });
+    res.json({ problems: validateInstructions(kind, instructions), advice: adviseInstructions(kind, instructions) });
+  });
+
+  app.post('/api/prompts', async (req, res) => {
+    const { kind, instructions, reset = false } = req.body || {};
+    if (!PROMPT_KINDS[kind]) return res.status(400).json({ error: `Unknown prompt "${kind}"` });
+    const next = { ...(config.prompts || {}) };
+    if (reset || instructions === PROMPT_KINDS[kind].defaultInstructions) {
+      delete next[kind];
+    } else {
+      const problems = validateInstructions(kind, instructions);
+      if (problems.length) return res.status(400).json({ error: problems.join(' ') });
+      next[kind] = instructions;
+    }
+    config.prompts = next;
+    let persisted = true;
+    let persistError = null;
+    try {
+      await persistConfigPatch({ prompts: next });
+    } catch (err) {
+      persisted = false;
+      persistError = err.message;
+    }
+    res.json({ ...promptPayload(kind), persisted, persistError });
+  });
+
+  /** Picks the card a preview/test runs on: the one asked for, else the first scored one, else the first file. */
+  async function sampleCardFile(requested) {
+    if (requested) return requested;
+    const store = await getStore(config.charactersDir);
+    const files = (await readdir(config.charactersDir)).filter((f) => /\.(png|json)$/i.test(f)).sort();
+    return files.find((f) => store.get(f)?.result && !store.get(f).result.partial) || files[0];
+  }
+
+  // Exactly what would be sent for this card — system and user message — with
+  // no request made. Works with unsaved edits.
+  app.post('/api/prompts/preview', async (req, res) => {
+    const { kind, instructions = null, cardId } = req.body || {};
+    if (!PROMPT_KINDS[kind]) return res.status(400).json({ error: `Unknown prompt "${kind}"` });
+    try {
+      const file = await sampleCardFile(cardId);
+      if (!file) return res.status(400).json({ error: 'There are no cards in this folder to preview with.' });
+      const { card } = await readCardOrThrow(file);
+      const store = await getStore(config.charactersDir);
+      const built = kind === 'improve'
+        ? buildImprovePrompts(card, store.get(file)?.result, { prompts: config.prompts, draftInstructions: instructions })
+        : buildScoringPrompts(card, config.weights, { detail: kind, prompts: config.prompts, draftInstructions: instructions });
+      res.json({
+        cardId: file,
+        cardName: card.name,
+        system: built.system,
+        user: built.user,
+        approxTokens: Math.ceil((built.system.length + built.user.length) / 4),
+      });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // Runs the (possibly unsaved) prompt once against one card and returns what
+  // came back. One real request; nothing is saved to the card. The point is to
+  // see an edit work on one card before spending it on three thousand.
+  app.post('/api/prompts/test', async (req, res) => {
+    const { kind, instructions = null, cardId } = req.body || {};
+    if (!PROMPT_KINDS[kind]) return res.status(400).json({ error: `Unknown prompt "${kind}"` });
+    if (instructions != null) {
+      const problems = validateInstructions(kind, instructions);
+      if (problems.length) return res.status(400).json({ error: problems.join(' ') });
+    }
+    try {
+      const file = await sampleCardFile(cardId);
+      if (!file) return res.status(400).json({ error: 'There are no cards in this folder to test with.' });
+      const { card } = await readCardOrThrow(file);
+      const store = await getStore(config.charactersDir);
+      const provider = getProvider();
+      const started = Date.now();
+      let output;
+      if (kind === 'improve') {
+        output = await improveCard(card, store.get(file)?.result, provider, { prompts: config.prompts, draftInstructions: instructions });
+      } else {
+        output = await scoreCard(card, provider, { weights: config.weights, detail: kind, prompts: config.prompts, draftInstructions: instructions });
+      }
+      res.json({
+        cardId: file,
+        cardName: card.name,
+        tookMs: Date.now() - started,
+        currentScore: store.get(file)?.result?.overall_score ?? null,
+        output,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message, kind: classifyError(err.message) });
     }
   });
 

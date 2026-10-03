@@ -1,4 +1,5 @@
 import { SCORABLE_FIELDS, estimateTokens } from './cardParser.js';
+import { DEFAULT_PROMPTS, systemPrompt } from './prompts.js';
 
 /**
  * Rewriting a card is a different job from scoring one, and the failure modes
@@ -7,37 +8,8 @@ import { SCORABLE_FIELDS, estimateTokens } from './cardParser.js';
  * nothing. Both are explicitly forbidden below, and the length rule is also
  * checked in code afterwards (see measureFields) rather than merely requested.
  */
-export const IMPROVE_SYSTEM_PROMPT = `You are a senior editor for SillyTavern character cards. You are given a \
-card, a critique of it, and you return an edited version of the fields that need work.
-
-You are EDITING, not inventing. Hard rules, in priority order:
-
-1. SAME CHARACTER. Keep the name, identity, personality core, speech register, setting, relationships, body, \
-age and canon exactly as they are. Never add a new backstory element, power, relative or plot twist that is \
-not already implied by the card. If a weakness can only be fixed by inventing facts, make the writing sharper \
-instead and leave the facts alone.
-2. DO NOT PAD. Quality per token is the whole point. Every rewritten field must be the SAME LENGTH OR SHORTER \
-than the original — cut filler, redundancy, restated traits and purple prose to make room for anything you add. \
-The only exception is a field that is empty or nearly empty, which may be filled in compactly. A longer card \
-is a worse card.
-3. FIX WHAT THE CRITIQUE NAMED. Address the specific weaknesses and suggestions given for that field. Vague, \
-generic writing becomes concrete and specific; contradictions get resolved; traits that are asserted get shown \
-in behaviour instead.
-4. KEEP THE FORMAT. Preserve {{char}} and {{user}} macros exactly. Keep mes_example in its <START> / \
-"{{user}}:" / "{{char}}:" turn format. Keep first_mes in the card's own narrative person, tense and formatting \
-style (asterisk actions, quotes, prose) — match what is already there.
-5. CARD TEXT ONLY. No notes to the reader, no headings you invented, no "Improved:" labels, no commentary \
-inside the field text.
-
-Only include a field in your response if you are actually improving it. Leave out anything already good.
-
-Respond with ONLY a single valid JSON object (no markdown fences, no commentary) in exactly this shape:
-{
-  "fields": {
-    "<field_name>": { "text": "<the full rewritten field text>", "why": "<one short sentence on what you changed>" }
-  },
-  "headline": "<one sentence on the overall change>"
-}`;
+// Kept for anything that imports it; the editable source is prompts.js.
+export const IMPROVE_SYSTEM_PROMPT = DEFAULT_PROMPTS.improve;
 
 function critiqueFor(result, field) {
   const f = result?.fields?.[field];
@@ -50,7 +22,7 @@ function critiqueFor(result, field) {
 }
 
 /** The exact prompt pair an improve request sends, so tests and diagnostics can reuse it. */
-export function buildImprovePrompts(card, result, { fields } = {}) {
+export function buildImprovePrompts(card, result, { fields, prompts = {}, draftInstructions = null } = {}) {
   const wanted = fields?.length ? fields.filter((f) => SCORABLE_FIELDS.includes(f)) : SCORABLE_FIELDS;
   const parts = [`Character name: ${card.name}`, ''];
 
@@ -77,7 +49,7 @@ export function buildImprovePrompts(card, result, { fields } = {}) {
       'Keep each rewrite within the token budget shown for that field.',
   );
 
-  return { system: IMPROVE_SYSTEM_PROMPT, user: parts.join('\n'), editable };
+  return { system: systemPrompt('improve', prompts, draftInstructions), user: parts.join('\n'), editable };
 }
 
 function extractJsonBlock(text) {
@@ -156,8 +128,8 @@ export function measureFields(card, proposed) {
  * critique. Returns proposals only — nothing is written to disk here, so the
  * result can be reviewed and edited before it becomes a file.
  */
-export async function improveCard(card, result, provider, { fields } = {}) {
-  const { system, user } = buildImprovePrompts(card, result, { fields });
+export async function improveCard(card, result, provider, { fields, prompts = {}, draftInstructions = null } = {}) {
+  const { system, user } = buildImprovePrompts(card, result, { fields, prompts, draftInstructions });
 
   // The output *is* the card, so the budget has to scale with the card: a 4k
   // token card cannot be rewritten inside a 3k token default.

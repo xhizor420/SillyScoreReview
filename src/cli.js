@@ -220,7 +220,7 @@ async function cmdScan(args) {
     if (stopReason) return;
     const { file, card, hash } = item;
     try {
-      const result = await scoreCard(card, provider, { weights: config.weights, detail: config.scoreDetail });
+      const result = await scoreCard(card, provider, { weights: config.weights, detail: config.scoreDetail, prompts: config.prompts });
       // Not awaited per card: on a big cache that would park each worker for a
       // whole write-batch window. The run flushes once at the end.
       store.set(file, {

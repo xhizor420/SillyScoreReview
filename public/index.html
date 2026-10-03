@@ -8,37 +8,62 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="topbar-title">
+  <div class="brand">
     <h1>SillyScoreReview</h1>
     <span id="dirLabel" class="dir-label"></span>
   </div>
-  <div class="topbar-stats" id="stats"></div>
+  <div class="topbar-actions">
+    <button id="scanUnscoredBtn" class="primary" title="Scores every card with no score yet, including any that failed last time — no need to rescore everything.">Scan unscored</button>
+    <button id="promptsBtn" class="secondary">Prompts</button>
+    <button id="settingsBtn" class="secondary">Settings</button>
+    <div class="menu">
+      <button id="moreBtn" class="secondary" aria-haspopup="menu" aria-expanded="false" aria-controls="moreMenu">More ▾</button>
+      <div id="moreMenu" class="menu-pop hidden" role="menu">
+        <button id="rescanAllBtn" role="menuitem">Rescore all…</button>
+        <button id="exportScoresBtn" role="menuitem" title="Save a JSON backup of every score. Restore with: node src/cli.js import-scores &lt;file&gt;">Export scores</button>
+        <button id="folderBtn" role="menuitem">Change folder</button>
+        <button id="trashToggleBtn" role="menuitem">Trash</button>
+      </div>
+    </div>
+  </div>
 </header>
 
+<section class="overview" aria-label="Collection overview">
+  <div class="stat-row" id="stats"></div>
+  <div class="dist-wrap">
+    <div class="dist-head">
+      <span class="dist-title">Score distribution</span>
+      <span class="dist-hint" id="distHint">click a bar to show just those cards</span>
+    </div>
+    <div class="dist" id="dist" role="group" aria-label="Number of cards in each score range"></div>
+    <div class="dist-axis" aria-hidden="true"><span>1</span><span>score</span><span>10</span></div>
+  </div>
+  <div id="distTooltip" class="dist-tooltip hidden" role="status"></div>
+</section>
+
 <div class="toolbar">
-  <input id="search" type="search" placeholder="Search name…" />
-  <select id="sortBy">
+  <input id="search" type="search" placeholder="Search name…" aria-label="Search cards by name" />
+  <select id="sortBy" aria-label="Sort">
     <option value="score-asc">Score: low → high</option>
     <option value="score-desc">Score: high → low</option>
     <option value="tokens-desc">Tokens: high → low</option>
     <option value="tokens-asc">Tokens: low → high</option>
     <option value="name">Name A → Z</option>
   </select>
-  <select id="filterBy">
+  <select id="filterBy" aria-label="Filter">
     <option value="all">All cards</option>
     <option value="unscored">Unscored / errored only</option>
     <option value="below4">Score below 4</option>
     <option value="below6">Score below 6</option>
     <option value="scored">Scored only</option>
     <option value="fast-scored">Fast-scored (no critique yet)</option>
+    <option value="prompt-stale">Scored with an older prompt</option>
     <option value="duplicates">Possible duplicates</option>
   </select>
-  <button id="scanUnscoredBtn" title="Scores every card with no score yet, including any that failed last time — no need to rescore everything.">Scan unscored</button>
-  <button id="rescanAllBtn" class="secondary">Rescore all</button>
-  <button id="folderBtn" class="secondary">Change folder</button>
-  <button id="settingsBtn" class="secondary">Settings</button>
-  <button id="exportScoresBtn" class="secondary" title="Save a JSON backup of every score. Restore with: node src/cli.js import-scores &lt;file&gt;">Export scores</button>
-  <button id="trashToggleBtn" class="secondary">Trash</button>
+  <div class="density" role="group" aria-label="Card size">
+    <button id="densityComfy" class="secondary seg" aria-pressed="true" title="Large cards">▢ Large</button>
+    <button id="densityCompact" class="secondary seg" aria-pressed="false" title="Fit more cards on screen">▦ Compact</button>
+  </div>
 </div>
 
 <div id="scanPanel" class="scan-panel hidden">
@@ -125,12 +150,59 @@
   </div>
 </aside>
 
+<aside id="promptsPanel" class="trash-panel wide hidden" aria-labelledby="promptsTitle">
+  <div class="trash-header">
+    <h2 id="promptsTitle">Prompts</h2>
+    <button id="closePromptsBtn" class="secondary">Close</button>
+  </div>
+  <p class="folder-hint">What the model is told when it scores or improves a card. Change the instructions to
+  grade the way you want — a different rubric, stricter or kinder, a genre focus, feedback in another language.
+  Try an edit on one card before saving it, so a whole scan isn't spent on a prompt that doesn't do what you meant.</p>
+
+  <div class="tabs" role="tablist" id="promptTabs"></div>
+  <p id="promptDescription" class="folder-hint"></p>
+
+  <label for="promptText" class="field-label">Instructions <span id="promptState" class="pill"></span></label>
+  <textarea id="promptText" class="prompt-text" rows="16" spellcheck="true"></textarea>
+  <div class="prompt-meta"><span id="promptCount"></span></div>
+  <div id="promptAdvice"></div>
+
+  <details class="locked-format">
+    <summary>Response format — always added after your instructions, not editable</summary>
+    <p class="folder-hint">This is the exact shape the code reads back. It is locked so that no edit above can
+    make every card in a scan fail to parse.</p>
+    <pre id="promptFormat" class="card-field-text"></pre>
+  </details>
+
+  <div class="prompt-actions">
+    <button id="savePromptBtn">Save</button>
+    <button id="discardPromptBtn" class="secondary">Discard changes</button>
+    <button id="resetPromptBtn" class="secondary">Reset to default</button>
+  </div>
+  <p id="promptMsg" class="folder-hint" role="status"></p>
+
+  <div class="try-it">
+    <h3>Try it on a card</h3>
+    <div class="folder-path-row">
+      <select id="promptCard" aria-label="Card to try the prompt on"></select>
+    </div>
+    <div class="prompt-actions">
+      <button id="previewPromptBtn" class="secondary">Show exactly what's sent</button>
+      <button id="testPromptBtn" class="secondary">Test on this card (1 request)</button>
+    </div>
+    <div id="promptOutput"></div>
+  </div>
+
+  <p id="promptStale" class="folder-hint"></p>
+</aside>
+
 <aside id="settingsPanel" class="trash-panel hidden">
   <div class="trash-header">
     <h2>LLM Settings</h2>
     <button id="closeSettingsBtn" class="secondary">Close</button>
   </div>
 
+  <h3 class="settings-section">Connection</h3>
   <div class="settings-field">
     <label for="settingsProvider">Provider</label>
     <select id="settingsProvider"></select>
@@ -155,6 +227,7 @@
     <input id="settingsModelCustom" type="text" placeholder="or type the exact model name" />
   </div>
 
+  <h3 class="settings-section">Scanning</h3>
   <div class="settings-field">
     <label for="settingsDetail">Scoring detail</label>
     <select id="settingsDetail">
@@ -189,6 +262,7 @@
   </div>
   <p id="settingsMsg" class="folder-hint"></p>
 
+  <h3 class="settings-section">Backups</h3>
   <div class="settings-field">
     <label>Score backups</label>
     <p class="folder-hint">Taken automatically when the dashboard starts, before a “Rescore all”, and every 250 cards during a scan. Restore one by closing the dashboard and running <code>node src/cli.js restore-backup &lt;name&gt;</code>.</p>

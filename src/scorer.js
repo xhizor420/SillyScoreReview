@@ -1,4 +1,5 @@
 import { SCORABLE_FIELDS, estimateTokens } from './cardParser.js';
+import { DEFAULT_PROMPTS, systemPrompt, promptHash } from './prompts.js';
 
 // Relative importance of each field when computing the weighted overall score.
 // Only fields that are actually non-empty on a given card are used; the
@@ -14,73 +15,20 @@ export const DEFAULT_WEIGHTS = {
   alternate_greetings: 0.0, // scored for feedback, excluded from overall by default
 };
 
-export const FULL_SYSTEM_PROMPT = `You are a critical, experienced editor for SillyTavern-style AI roleplay character cards. \
-You review card fields for writing quality, clarity, internal consistency, and how well they will actually \
-drive an LLM to roleplay the character well — not for raw length. A short, sharp card can outscore a long, \
-padded one; call out padding, redundancy, and vague generic writing as weaknesses wherever you see them.
+// The prompts live in prompts.js, split into editable instructions and a
+// locked response format. These names are kept for anything that imports them.
+export const FULL_SYSTEM_PROMPT = DEFAULT_PROMPTS.full;
+export const FAST_SYSTEM_PROMPT = DEFAULT_PROMPTS.fast;
 
-Rate this character card on a scale of 1-10 for each field provided.
-
-For each field:
-1. Score (1-10)
-2. Strengths - What works well
-3. Weaknesses - What needs improvement
-4. Suggestions - Concrete changes
-
-Then provide:
-- Overall Score (weighted average)
-- Top 3 Priority Improvements
-- Summary
-
-Be critical but constructive. Specific, actionable feedback only. Keep each strengths/weaknesses/suggestions \
-entry to one short sentence (max ~20 words) — this is a fast triage pass across a large card collection, not \
-a full editorial letter, and a long response risks being cut off before it's valid JSON.
-
-Respond with ONLY a single valid JSON object (no markdown fences, no commentary before or after) matching \
-exactly this shape:
-{
-  "fields": {
-    "<field_name>": { "score": <1-10 integer>, "strengths": "<string>", "weaknesses": "<string>", "suggestions": "<string>" }
-  },
-  "overall_score": <number 1-10, one decimal>,
-  "top_priority_improvements": ["<string>", "<string>", "<string>"],
-  "summary": "<2-4 sentence summary>"
-}
-Include an entry in "fields" for every field given to you below, using the exact field name shown.`;
-
-/**
- * Triage mode. Scoring is ~100% model latency, and latency is dominated by how
- * much the model has to *write* — the full rubric asks for three sentences per
- * field plus a summary, which is 10-20x more output than the numbers alone.
- *
- * For a first pass over thousands of cards the numbers are the whole job: you
- * cull by score and you only need the written critique for the handful you keep
- * and want to improve. So this asks for exactly the scores, and any card can be
- * rescored in full later without re-reading the collection.
- */
-export const FAST_SYSTEM_PROMPT = `You are a critical, experienced editor for SillyTavern-style AI roleplay \
-character cards. You judge writing quality, clarity, internal consistency, and how well a field will actually \
-drive an LLM to roleplay the character well — never length. A short, sharp card outscores a long padded one; \
-treat padding, redundancy and vague generic writing as faults.
-
-Rate each field you are given from 1-10, applying the same standard you would if you were writing out the \
-full critique. Do not be generous: the scores are used to decide which cards get deleted.
-
-Respond with ONLY a single valid JSON object, no markdown fences and no commentary, in exactly this shape:
-{"fields": {"<field_name>": <1-10 integer>}, "overall_score": <number 1-10, one decimal>}
-
-Include every field name given to you below, spelled exactly as shown. Output nothing else — no strengths, no \
-weaknesses, no suggestions, no summary.`;
-
-/** Picks the system prompt for a scoring detail level. */
-export function systemPromptFor(detail) {
-  return detail === 'fast' ? FAST_SYSTEM_PROMPT : FULL_SYSTEM_PROMPT;
+/** Picks the system prompt for a scoring detail level, honouring any edits in `prompts`. */
+export function systemPromptFor(detail, prompts = {}, draftInstructions = null) {
+  return systemPrompt(detail === 'fast' ? 'fast' : 'full', prompts, draftInstructions);
 }
 
 /** The exact system+user prompt pair a real scan sends, so diagnostics can reuse it verbatim. */
-export function buildScoringPrompts(card, weights = DEFAULT_WEIGHTS, { detail = 'full' } = {}) {
+export function buildScoringPrompts(card, weights = DEFAULT_WEIGHTS, { detail = 'full', prompts = {}, draftInstructions = null } = {}) {
   return {
-    system: systemPromptFor(detail),
+    system: systemPromptFor(detail, prompts, draftInstructions),
     user: buildUserPrompt(card, weights, { skipZeroWeight: detail === 'fast' }),
   };
 }
@@ -139,7 +87,7 @@ function recomputeOverall(fields, weights) {
  * Scores a single normalized card via the given provider. Retries once with
  * a stricter instruction if the model's response isn't valid JSON.
  */
-export async function scoreCard(card, provider, { weights = DEFAULT_WEIGHTS, detail = 'full' } = {}) {
+export async function scoreCard(card, provider, { weights = DEFAULT_WEIGHTS, detail = 'full', prompts = {}, draftInstructions = null } = {}) {
   const fast = detail === 'fast';
   let user = buildUserPrompt(card, weights, { skipZeroWeight: fast });
   // A card whose only text is in zero-weight fields still deserves a score;
@@ -148,7 +96,7 @@ export async function scoreCard(card, provider, { weights = DEFAULT_WEIGHTS, det
   if (!user.includes('###')) {
     throw new Error('Card has no non-empty scorable fields');
   }
-  const system = systemPromptFor(detail);
+  const system = systemPromptFor(detail, prompts, draftInstructions);
 
   // Fast mode writes a couple of dozen tokens, so it needs nowhere near the
   // default budget — and a tight cap is itself a guard against a model that
@@ -177,6 +125,9 @@ text field to one short sentence so the full response fits comfortably.`,
   if (!result) {
     throw new Error('Model did not return parseable JSON after retry');
   }
+  // Fingerprint the prompt that produced this, so a later prompt edit can tell
+  // which scores came from the old wording.
+  result.promptHash = promptHash(system);
   return detail === 'fast' ? { ...result, brief: true } : result;
 }
 
