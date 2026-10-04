@@ -23,7 +23,8 @@ const els = {
   search: document.getElementById('search'),
   sortBy: document.getElementById('sortBy'),
   filterBy: document.getElementById('filterBy'),
-  scanUnscoredBtn: document.getElementById('scanUnscoredBtn'),
+  fastScanBtn: document.getElementById('fastScanBtn'),
+  critiqueScanBtn: document.getElementById('critiqueScanBtn'),
   rescanAllBtn: document.getElementById('rescanAllBtn'),
   trashToggleBtn: document.getElementById('trashToggleBtn'),
   exportScoresBtn: document.getElementById('exportScoresBtn'),
@@ -59,6 +60,7 @@ const els = {
   clearFocusBtn: document.getElementById('clearFocusBtn'),
   selectFocusLosersBtn: document.getElementById('selectFocusLosersBtn'),
   scoreSelectedBtn: document.getElementById('scoreSelectedBtn'),
+  critiqueSelectedBtn: document.getElementById('critiqueSelectedBtn'),
   deleteSelectedBtn: document.getElementById('deleteSelectedBtn'),
   copySelectedBtn: document.getElementById('copySelectedBtn'),
   clearSelectionBtn: document.getElementById('clearSelectionBtn'),
@@ -693,11 +695,13 @@ function renderSelectionBar() {
   renderFocusBar();
 
   els.selectionCount.textContent = n ? `${n} selected` : '';
-  for (const btn of [els.scoreSelectedBtn, els.copySelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]) {
+  for (const btn of [els.scoreSelectedBtn, els.critiqueSelectedBtn, els.copySelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]) {
     btn.classList.toggle('hidden', n === 0);
   }
   els.deleteSelectedBtn.textContent = n ? `Delete selected (${n})` : 'Delete selected';
   els.copySelectedBtn.textContent = n ? `Copy selected (${n}) to…` : 'Copy selected to…';
+  els.scoreSelectedBtn.textContent = n ? `Fast score (${n})` : 'Fast score';
+  els.critiqueSelectedBtn.textContent = n ? `Full critique (${n})` : 'Full critique';
 }
 
 async function openCard(id) {
@@ -709,9 +713,9 @@ async function openCard(id) {
   const briefOnly = Boolean(result?.brief);
   html += `<div class="modal-actions">
     <button data-action="score">${briefOnly ? 'Rescore with full critique' : result ? 'Rescore' : 'Score this card'}</button>
-    <button data-action="improve" title="${result && !result.partial
-      ? 'Rewrites the weak fields using this card\'s own critique. You review and edit the result before anything is saved.'
-      : 'Score this card first for a critique-guided rewrite — or improve it now on the text alone.'}">Improve with AI</button>
+    <button data-action="improve" title="${result && !result.partial && !briefOnly
+      ? 'Ideas aimed at this card\'s critique, then a rewrite of only the ones you tick. You compare and pick before anything is saved.'
+      : 'Writes the full critique first, then ideas aimed at it, then a rewrite of only the ones you tick. You compare and pick before anything is saved.'}">Improve with AI</button>
     <button data-action="edit" class="secondary">Edit text</button>
     <button data-action="delete" class="danger">Delete</button>
   </div>`;
@@ -952,7 +956,7 @@ async function pollJob(jobId) {
     alert(
       `Scan stopped. ${job.done} card${job.done === 1 ? '' : 's'} scored${job.errors ? `, ${job.errors} failed` : ''}` +
       `${job.skipped ? `, ${job.skipped} not started` : ''}.\n\n` +
-      'Every score that finished is saved. "Scan unscored" picks up exactly where this left off.',
+      `Every score that finished is saved. "${job.detail === 'fast' ? 'Fast score' : 'Full critique'}" picks up exactly where this left off.`,
     );
     return;
   }
@@ -972,7 +976,7 @@ async function pollJob(jobId) {
     }
     alert(
       `${job.errors} of ${job.done + job.errors} cards failed to score.${why}\n\n` +
-      `Failed cards are not lost — "Scan unscored" retries them.\n\n` +
+      `Failed cards are not lost — "${job.detail === 'fast' ? 'Fast score' : 'Full critique'}" retries them.\n\n` +
       `For a live check against your API, run:  node src/cli.js doctor`,
     );
   }
@@ -1082,14 +1086,49 @@ try {
   setDensity('comfy', false);
 }
 
-els.scanUnscoredBtn.addEventListener('click', () => startBatch({ scope: 'unscored' }));
+// The two ways to scan, side by side. The usual order for a big library is
+// Fast score → delete what you don't want → Full critique on what's left; the
+// second only ever spends requests on cards that don't have a critique yet.
+els.fastScanBtn.addEventListener('click', () => {
+  const n = state.cards.filter((c) => c.overallScore == null).length;
+  if (!n) {
+    alert('Every card already has a score.\n\nTo rescore some, select them and press "Fast score" in the selection bar.');
+    return;
+  }
+  startBatch({ scope: 'unscored', detail: 'fast' });
+});
+els.critiqueScanBtn.addEventListener('click', () => {
+  const unscored = state.cards.filter((c) => c.overallScore == null).length;
+  const fast = state.cards.filter((c) => c.overallScore != null && c.brief).length;
+  const n = unscored + fast;
+  if (!n) {
+    alert('Every card already has a full critique.\n\nTo redo some, select them and press "Full critique" in the selection bar.');
+    return;
+  }
+  if (n > 50) {
+    const parts = [fast && `${fast.toLocaleString()} fast-scored`, unscored && `${unscored.toLocaleString()} not scored yet`].filter(Boolean);
+    const tip = unscored > 200
+      ? '\n\nTip: for a big library, "Fast score" first and delete what you don\'t want — then this only critiques the keepers.'
+      : '';
+    if (!confirm(`Write a full critique for ${n.toLocaleString()} cards (${parts.join(', ')})?${tip}`)) return;
+  }
+  startBatch({ scope: 'uncritiqued', rescore: true, detail: 'full' });
+});
 els.rescanAllBtn.addEventListener('click', () => {
   if (confirm('Rescore ALL cards? This re-runs every card through the model, which costs time/money on a paid API.')) {
     startBatch({ scope: 'all', rescore: true });
   }
 });
 
-els.scoreSelectedBtn.addEventListener('click', () => startBatch({ scope: 'selected', ids: [...state.selected], rescore: true }));
+// The mode is in the button, not in Settings: switching Settings back and forth
+// to critique your keepers was a trap (forget, and you re-ran fast scoring on them).
+els.scoreSelectedBtn.addEventListener('click', () =>
+  startBatch({ scope: 'selected', ids: [...state.selected], rescore: true, detail: 'fast' }));
+els.critiqueSelectedBtn.addEventListener('click', () => {
+  const n = state.selected.size;
+  if (n > 50 && !confirm(`Write a full critique for ${n} cards? Full critiques are much slower than fast scores — this is the deep pass, meant for the cards you're keeping.`)) return;
+  startBatch({ scope: 'selected', ids: [...state.selected], rescore: true, detail: 'full' });
+});
 els.deleteSelectedBtn.addEventListener('click', async () => {
   const ids = [...state.selected];
   if (ids.length === 0) return;
@@ -1908,9 +1947,32 @@ function stepper(active) {
 }
 
 async function startImprove(id, name) {
+  // The chain is critique → ideas → rewrite, each feeding the next: the ideas
+  // aim at what the critique found, and the rewrite gets the ideas you ticked.
+  // A card with only a fast score (or none) gets its critique written first —
+  // it's saved to the card, so it isn't spent twice.
+  const known = state.cards.find((c) => c.id === id);
+  let critiqueFailed = null;
+  let critiqued = false;
+  if (!known || known.overallScore == null || known.brief) {
+    els.modalBody.innerHTML = `<h2>Improve: ${escapeHtml(name)}</h2>${stepper(1)}
+      <p class="editor-working">Writing the full critique first, so the ideas can aim at what it finds…</p>
+      <p class="folder-hint">Request 1 of 2. The critique is saved to the card.</p>`;
+    try {
+      await api(`/api/cards/${encodeURIComponent(id)}/score`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ detail: 'full' }),
+      });
+      critiqued = true;
+      loadCards().catch(() => {}); // refresh the grid behind the modal
+    } catch (err) {
+      critiqueFailed = err.message; // ideas from the text alone still beat nothing
+    }
+  }
   els.modalBody.innerHTML = `<h2>Improve: ${escapeHtml(name)}</h2>${stepper(2)}
-    <p class="editor-working">Reading the card and its rating, and drafting ideas…</p>
-    <p class="folder-hint">One request. Nothing is rewritten in this step.</p>`;
+    <p class="editor-working">Reading the card and its critique, and drafting ideas…</p>
+    <p class="folder-hint">${critiqued || critiqueFailed ? 'Request 2 of 2' : 'One request'}. Nothing is rewritten in this step.</p>`;
   try {
     const data = await api(`/api/cards/${encodeURIComponent(id)}/ideas`, { method: 'POST' });
     ideasState = {
@@ -1918,6 +1980,7 @@ async function startImprove(id, name) {
       name: data.name,
       previousScore: data.previousScore,
       hadCritique: data.hadCritique,
+      critiqueFailed,
       lorebookSupported: data.lorebookSupported,
       keep: data.keep,
       keepQuotes: data.keepQuotes,
@@ -1946,8 +2009,11 @@ function renderIdeas() {
 
   let html = `<h2>Improve: ${escapeHtml(st.name)}</h2>${stepper(2)}`;
   if (!st.hadCritique) {
-    html += `<div class="partial-note">This card has no full critique yet, so these ideas are based on the text alone.
-      For ideas aimed at what the rating found, close this and press <b>Rescore with full critique</b> first.</div>`;
+    html += `<div class="partial-note">${st.critiqueFailed
+      ? `The full critique couldn't be written (${escapeHtml(st.critiqueFailed)}), so these ideas are based on the text alone.
+        Close this and press <b>Improve with AI</b> again to retry the critique.`
+      : `This card has no complete critique, so these ideas are based on the text alone.
+        For ideas aimed at what a critique finds, close this and press <b>Rescore with full critique</b> first.`}</div>`;
   }
   html += `<p class="folder-hint">Tick the changes you want. Only those are made, only the fields they touch are
     sent for rewriting, and everything on the keep list below is treated as untouchable. You review the result
@@ -2330,7 +2396,10 @@ pels.test.addEventListener('click', async () => {
     });
     pels.output.replaceChildren(renderTestResult(r));
   } catch (err) {
-    pels.output.replaceChildren(noteEl(`The test request failed: ${err.message}`, 'bad'));
+    // When the answer couldn't be used, what the model actually said is the
+    // most useful thing to see — so it opens by itself.
+    const raw = repliesSection(err.body?.replies, { open: true });
+    pels.output.replaceChildren(noteEl(`The test request failed: ${err.message}`, 'bad'), ...(raw ? [raw] : []));
   } finally {
     pels.test.disabled = false;
   }
@@ -2345,6 +2414,7 @@ function renderTestResult(r) {
   box.append(head);
 
   const out = r.output;
+  const raw = repliesSection(r.replies);
   if (promptUi.active === 'improve') {
     const h = document.createElement('p');
     h.textContent = out.headline || 'The model proposed these changes:';
@@ -2352,6 +2422,17 @@ function renderTestResult(r) {
     for (const [field, f] of Object.entries(out.fields)) {
       box.append(outputBlock(`${field.replace(/_/g, ' ')} · ${f.tokensBefore} → ${f.tokensAfter} tok${f.why ? ` · ${f.why}` : ''}`, f.text));
     }
+    if (raw) box.append(raw);
+    return box;
+  }
+  if (promptUi.active === 'ideas') {
+    if (out.keep?.length) box.append(outputBlock('What makes this card itself (kept in any rewrite)', out.keep.map((k) => `• ${k}`).join('\n')));
+    if (out.keepQuotes?.length) box.append(outputBlock('Exact lines to keep word for word', out.keepQuotes.map((q) => `"${q}"`).join('\n')));
+    for (const idea of out.ideas || []) {
+      const lines = [idea.change, idea.why && `Why: ${idea.why}`, idea.risk && `Risk: ${idea.risk}`].filter(Boolean);
+      box.append(outputBlock(`${idea.field.replace(/_/g, ' ')} · ${idea.impact} impact${idea.lorebook ? ' · lorebook' : ''} — ${idea.title}`, lines.join('\n')));
+    }
+    if (raw) box.append(raw);
     return box;
   }
 
@@ -2377,7 +2458,53 @@ function renderTestResult(r) {
     const lines = [f.strengths && `Strengths: ${f.strengths}`, f.weaknesses && `Weaknesses: ${f.weaknesses}`, f.suggestions && `Suggestions: ${f.suggestions}`].filter(Boolean);
     box.append(outputBlock(`${field.replace(/_/g, ' ')} — ${f.score ?? '–'}/10`, lines.join('\n') || '(scores only)'));
   }
+  if (raw) box.append(raw);
   return box;
+}
+
+/**
+ * The model's replies exactly as they arrived — thinking, stray text and all —
+ * with why each one stopped and what it cost. Above it is what the dashboard
+ * made of the reply; this is what the model actually said.
+ */
+function repliesSection(replies, { open = false } = {}) {
+  if (!replies?.length) return null;
+  const d = document.createElement('details');
+  d.className = 'raw-replies';
+  d.open = open;
+  const sum = document.createElement('summary');
+  sum.textContent = replies.length > 1
+    ? `What the model sent back (${replies.length} replies — an answer that couldn't be used was asked for again)`
+    : 'What the model sent back';
+  d.append(sum);
+  replies.forEach((reply, i) => {
+    const u = reply.usage || {};
+    const sent = u.prompt_tokens ?? u.input_tokens;
+    const got = u.completion_tokens ?? u.output_tokens;
+    const thinking = u.completion_tokens_details?.reasoning_tokens;
+    const facts = [
+      reply.latencyMs != null && `${(reply.latencyMs / 1000).toFixed(1)}s`,
+      reply.finishReason && (reply.finishReason === 'length' ? 'stopped: cut off by a length limit' : `stopped: ${reply.finishReason}`),
+      sent != null && `${sent.toLocaleString()} tokens in`,
+      got != null && `${got.toLocaleString()} out${thinking ? ` (${thinking.toLocaleString()} thinking)` : ''}`,
+    ].filter(Boolean);
+    const p = document.createElement('p');
+    p.className = 'folder-hint';
+    p.textContent = `${replies.length > 1 ? `Reply ${i + 1}: ` : ''}${facts.join(' · ') || 'no details reported by the provider'}`;
+    d.append(p);
+    if (reply.reasoning) {
+      const t = document.createElement('details');
+      const ts = document.createElement('summary');
+      ts.textContent = `Thinking (${reply.reasoning.length.toLocaleString()} characters)`;
+      const pre = document.createElement('pre');
+      pre.className = 'card-field-text';
+      pre.textContent = reply.reasoning;
+      t.append(ts, pre);
+      d.append(t);
+    }
+    d.append(outputBlock('Answer, as received', reply.content || '(empty — the model sent no answer text)'));
+  });
+  return d;
 }
 
 els.promptsBtn.addEventListener('click', () => openPrompts());

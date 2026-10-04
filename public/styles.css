@@ -40,6 +40,7 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
 }
 .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.scan-choices { display: flex; gap: 8px; }
 
 /* --- overview: stat tiles + score distribution --- */
 .overview {
@@ -347,6 +348,10 @@ body.density-compact .card-meta { font-size: 10px; }
 .try-it h3 { margin: 0 0 8px; font-size: 13px; }
 .try-it select { width: 100%; }
 .test-result .overall-block { margin-top: 8px; }
+.raw-replies { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.raw-replies > summary, .raw-replies details > summary { cursor: pointer; font-weight: 600; padding: 6px 0; min-height: 32px; }
+.raw-replies details { margin: 6px 0; }
+.raw-replies pre { max-height: 360px; overflow: auto; }
 
 /* --- compare & pick: each suggested change, original beside suggestion --- */
 .pick-summary {
@@ -652,7 +657,10 @@ body.select-mode .card-checkbox { width: 26px; height: 26px; }
   .brand { gap: 8px; }
   .brand h1 { font-size: 16px; }
   .dir-label { font-size: 11px; }
-  .topbar-actions { display: grid; grid-template-columns: 1fr auto auto auto; gap: 6px; }
+  /* The two scan choices share the first row half-and-half; the rest sit under them. */
+  .topbar-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  .scan-choices { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .topbar-actions .menu, .topbar-actions .menu > button { width: 100%; }
   .topbar-actions button { min-height: 42px; font-size: 13.5px; padding: 0 10px; }
   .menu-pop button { min-height: 44px; font-size: 14px; }
 

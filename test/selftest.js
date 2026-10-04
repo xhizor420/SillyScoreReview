@@ -433,6 +433,7 @@ async function main() {
   await testEditablePrompts();
   await testIdeasThenRewrite();
   await testChangePicker();
+  await testTwoPassAndRawReplies();
 
   console.log('\nAll self-tests passed.');
 }
@@ -1566,6 +1567,110 @@ async function testChangePicker() {
     for (const u of T.splitUnits(mixed)) assert.ok(allowed.has(u.trim()), `trial ${trial}: "${u}" is neither original nor suggested`);
   }
   console.log('✓ 300 random edits: every mix of allowed and kept changes is clean text from one version or the other');
+}
+
+/**
+ * Fast score everything, then Full critique only what still lacks a critique —
+ * each scan's kind decided by the request, never by the Settings default. And
+ * a prompt test hands back the model's replies exactly as they arrived.
+ */
+async function testTwoPassAndRawReplies() {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sillyscore-twopass-'));
+  const charactersDir = path.join(dir, 'characters');
+  await mkdir(charactersDir, { recursive: true });
+  for (let i = 0; i < 6; i++) {
+    await writeFile(path.join(charactersDir, `card-${i}.png`), buildFakePng({
+      spec: 'chara_card_v2',
+      data: { name: `Card ${i}`, description: 'A description long enough to be scorable.', first_mes: 'hi', alternate_greetings: [] },
+    }));
+  }
+  const seen = [];
+  let unreadable = false;
+  const fakeApi = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const parsed = JSON.parse(body || '{}');
+      const system = parsed.messages.find((m) => m.role === 'system').content;
+      const fast = /Output nothing else — no strengths/.test(system);
+      seen.push(fast ? 'fast' : 'full');
+      const content = unreadable ? 'I would rate this card a 6 out of 10.'
+        : fast ? JSON.stringify({ fields: { description: 5 }, overall_score: 5 })
+          : `<think>{{user}} and {{char}}</think>${JSON.stringify({
+            fields: { description: { score: 6, strengths: 's', weaknesses: 'w', suggestions: 'x' } },
+            overall_score: 6, top_priority_improvements: [], summary: 's',
+          })}`;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { content, reasoning_content: fast ? 'separate thoughts' : undefined }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 100, completion_tokens: 20 },
+      }));
+    });
+  });
+  await new Promise((r) => fakeApi.listen(0, r));
+
+  const { startServer } = await import('../src/server.js');
+  const { DEFAULT_WEIGHTS } = await import('../src/scorer.js');
+  const server = await startServer({
+    charactersDir,
+    cacheFile: path.join(dir, 'data', 'cache.json'),
+    trashDir: path.join(dir, 'data', 'trash'),
+    configPath: path.join(dir, 'config.json'),
+    provider: 'openai', baseURL: `http://localhost:${fakeApi.address().port}`, apiKey: 'test', model: 'test-model',
+    concurrency: 3, weights: DEFAULT_WEIGHTS, port: 4189, retryBaseDelayMs: 10,
+    scoreDetail: 'full', // the default says full; the fast pass must still be fast
+  });
+  const base = 'http://localhost:4189';
+  const post = async (url, body) => (await fetch(base + url, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  })).json();
+  const finish = async (jobId) => {
+    for (let i = 0; i < 100; i++) {
+      const job = await (await fetch(`${base}/api/score/batch/${jobId}`)).json();
+      if (job.status !== 'running') return job;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error('scan never finished');
+  };
+
+  try {
+    let job = await finish((await post('/api/score/batch', { scope: 'unscored', detail: 'fast' })).jobId);
+    assert.equal(job.done, 6);
+    assert.deepEqual([...new Set(seen.splice(0))], ['fast']);
+
+    // one card already has its critique; the second pass must skip it
+    await post('/api/cards/card-0.png/score', { detail: 'full' });
+    seen.length = 0;
+    job = await finish((await post('/api/score/batch', { scope: 'uncritiqued', rescore: true, detail: 'full' })).jobId);
+    assert.equal(job.total, 5, 'only the cards still without a critique');
+    assert.deepEqual([...new Set(seen.splice(0))], ['full']);
+    const again = await post('/api/score/batch', { scope: 'uncritiqued', rescore: true, detail: 'full' });
+    assert.equal(again.total, 0, 'a second Full critique has nothing left to do');
+    await finish(again.jobId);
+    const { cards } = await (await fetch(`${base}/api/cards`)).json();
+    assert.ok(cards.every((c) => c.overallScore === 6 && !c.brief));
+    console.log('✓ Fast score then Full critique: the second pass critiques only the 5 cards without one, then has nothing left');
+
+    // the prompt test shows what came back — on success and on an unreadable answer
+    const ok = await post('/api/prompts/test', { kind: 'fast', cardId: 'card-1.png' });
+    assert.equal(ok.replies.length, 1);
+    assert.equal(ok.replies[0].reasoning, 'separate thoughts');
+    assert.equal(ok.replies[0].finishReason, 'stop');
+    assert.equal(ok.replies[0].usage.prompt_tokens, 100);
+    const full = await post('/api/prompts/test', { kind: 'full', cardId: 'card-1.png' });
+    assert.match(full.replies[0].content, /^<think>\{\{user\}\}/, 'the raw answer, thinking included, exactly as received');
+    unreadable = true;
+    const bad = await (await fetch(`${base}/api/prompts/test`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'fast', cardId: 'card-1.png' }),
+    })).json();
+    assert.ok(bad.error);
+    assert.equal(bad.replies.length, 2, 'both attempts are shown when the answer could not be read');
+    assert.match(bad.replies[1].content, /rate this card a 6/);
+    console.log('✓ a prompt test returns each raw reply (thinking, finish reason, tokens) — including both failed attempts');
+  } finally {
+    server.close();
+    fakeApi.close();
+  }
 }
 
 main().catch((err) => {

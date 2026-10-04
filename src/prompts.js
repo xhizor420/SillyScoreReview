@@ -152,19 +152,19 @@ Use only the field names given below. Give 3 to 8 ideas, highest impact first.`;
 export const PROMPT_KINDS = {
   full: {
     label: 'Full critique',
-    description: 'Used for full scoring: a score plus strengths, weaknesses and suggestions for each field, three priority improvements and a summary.',
+    description: 'Used by Full critique (and "Rescore with full critique" on a card): a score plus strengths, weaknesses and suggestions for each field, three priority improvements and a summary.',
     defaultInstructions: FULL_INSTRUCTIONS,
     format: FULL_FORMAT,
   },
   fast: {
     label: 'Fast scoring',
-    description: 'Used when Scoring detail is set to Fast: a score per field and an overall score, no written feedback.',
+    description: 'Used by Fast score: a score per field and an overall score, no written feedback.',
     defaultInstructions: FAST_INSTRUCTIONS,
     format: FAST_FORMAT,
   },
   ideas: {
     label: 'Improvement ideas',
-    description: 'Step 1 of "Improve with AI": reads the card and its rating, lists what makes it itself (kept in any rewrite) and proposes specific changes for you to choose from. Nothing is rewritten here.',
+    description: 'Step 1 of "Improve with AI": reads the card and its full critique (written first if the card only has a fast score), lists what makes it itself (kept in any rewrite) and proposes specific changes for you to choose from. Nothing is rewritten here.',
     defaultInstructions: IDEAS_INSTRUCTIONS,
     format: IDEAS_FORMAT,
   },

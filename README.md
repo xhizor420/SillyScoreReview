@@ -112,8 +112,11 @@ scores instead of demanding a rescan.
 
 ## The dashboard at a glance
 
-- **Top bar** — the one thing you do most, **Scan unscored**, is the highlighted button.
-  **Prompts** and **Settings** sit next to it; everything occasional (Rescore all, Export
+- **Top bar** — the two ways to scan, side by side: **Fast score** (scores only, for
+  every card with no score yet) and **Full critique** (score plus written feedback, for
+  every card that doesn't have a critique yet — including fast-scored ones). Each button
+  always does what it says, whatever Settings says. **Prompts** and **Settings** sit next
+  to them; everything occasional (Rescore all, Export
   scores, Change folder, Trash) is under **More**.
 - **Stat tiles** — cards, scored, average, not scored yet, failed, and *older prompt*
   (see below). Click any tile that names a set of cards to show just those.
@@ -132,8 +135,8 @@ scores instead of demanding a rescan.
 
 | | used for |
 |---|---|
-| **Full critique** | scoring with written feedback — your original rubric |
-| **Fast scoring** | scoring when *Scoring detail* is set to Fast |
+| **Full critique** | the **Full critique** buttons and *Rescore with full critique* — your original rubric |
+| **Fast scoring** | the **Fast score** buttons |
 | **Improvement ideas** | step 2 of *Improve with AI* — the keep list and the menu of changes |
 | **Improve card** | step 3 of *Improve with AI* — the rewrite of the changes you chose |
 
@@ -150,7 +153,12 @@ Before saving, try an edit on one card:
   your unsaved edit. Sends nothing.
 - **Test on this card** — sends one real request with your unsaved edit and shows the
   result next to the card's current score ("Currently 7/10 — this version scores it
-  −5"). Nothing is saved to the card.
+  −5"). Nothing is saved to the card. Under it, **What the model sent back** shows the
+  reply exactly as it arrived — the thinking (inline `<think>` or the provider's separate
+  reasoning field), the raw answer, why it stopped (`stop`, or `length` if it was cut off)
+  and the tokens in / out / spent thinking. If the answer couldn't be read, this opens by
+  itself, with both attempts, so you can see what the model did instead of following the
+  format.
 
 The editor also warns you about edits that are allowed but probably not meant: writing
 your own JSON format (it would conflict with the locked one), asking fast mode for written
@@ -160,7 +168,7 @@ culling harder), or instructions long enough to noticeably slow down a big scan.
 **Changing a prompt never rescores anything by itself.** Every score remembers which
 prompt produced it, so after you save, an **older prompt** tile appears with a count, and
 the filter **Scored with an older prompt** shows just those cards — rescore them with
-**Select all shown → Score selected**, or leave them. **Reset to default** puts the
+**Select all shown → Fast score** or **Full critique**, or leave them. **Reset to default** puts the
 built-in prompt back. Edits are saved to `config.json` under `prompts`.
 
 ## Improving a card
@@ -169,10 +177,12 @@ Scoring tells you a card is a 4/10. **Improve with AI**, on the card itself, doe
 something about it — in two steps, so you decide what changes and the card keeps its
 feel.
 
-**1 · Rating.** Score the card first (a full critique gives the next step the most to
-work with; a card scored in fast mode or not at all still works, from its text alone).
+**1 · Rating.** Each step feeds the next: the full critique → ideas aimed at what it found
+→ a rewrite of only the ideas you tick. If the card has only a fast score (or none),
+Improve writes the full critique first, saves it to the card, then goes on — so it is
+never spent twice, and the ideas are never guessed from the text alone.
 
-**2 · Choose ideas.** The model reads the card and its rating and comes back with:
+**2 · Choose ideas.** The model reads the card and its critique and comes back with:
 
 - **What makes this card itself** — its voice, quirks, formatting, signature lines, canon
   facts. This list is editable: add anything you want protected, remove anything you're
@@ -255,8 +265,8 @@ near the machine the files live on.
 
 A scan of a few thousand cards runs for hours. **Stop scan** in the progress panel ends
 it without killing the server: cards already in flight finish and are saved, cards that
-hadn't started are left alone, and **Scan unscored** afterwards picks up exactly where it
-left off. Nothing is lost and nothing is scored twice.
+hadn't started are left alone, and pressing the same button again (**Fast score** or
+**Full critique**) picks up exactly where it left off. Nothing is lost and nothing is scored twice.
 
 ## Thinking models (GLM and others)
 
@@ -297,7 +307,7 @@ There are two layers handling them.
 | **API key rejected / out of credits / unknown model** | **Pauses** after the first rejection and says which it is. Nothing is marked failed. Fix it in Settings (or top up), press **Resume**, and it carries on from where it stopped. |
 | **Connection lost** (Wi-Fi, Tailscale reconnecting, the PC waking up, the provider down) | **Waits** instead of failing cards, checks for the connection every few seconds with a free request, and carries on **by itself** when it's back. |
 | **The provider keeps saying "too many requests"** | **Slows down** — halves its pace for every request in the app, then creeps back up to your normal rate once things are quiet. Never goes above the limit you set. |
-| **Some cards failed for temporary reasons** | Gets **one automatic retry pass** at the end of the run, so you don't have to press *Scan unscored* again. |
+| **Some cards failed for temporary reasons** | Gets **one automatic retry pass** at the end of the run, so you don't have to press the scan button again. |
 | **A rescore fails** | **Keeps the score the card already had.** (It used to overwrite it — a "Rescore all" with an expired key wiped every score. Fixed.) |
 | **You press Scan on your phone while one runs on the PC** | Shows the scan that's already running instead of starting a second one, which would double your request rate past NanoGPT's limit. |
 | **You reload the page, or open the dashboard on another device** | Finds the running scan and shows it, paused/waiting state included. |
@@ -364,9 +374,9 @@ panels become full-screen sheets. Shift-click has no touch equivalent, so tap
 is how you pick a lot of cards to delete or copy. Tap it again to go back to
 tap-to-open.
 
-To re-score cards that have no score or that failed, filter to **Unscored / errored
-only** — then either **Scan unscored** (does the whole set) or select individual cards
-and use **Score selected**.
+To score cards that have no score or that failed, press **Fast score** or **Full
+critique** at the top (each does the whole set), or select individual cards and use the
+same two buttons in the selection bar.
 
 ## Deleting cards does NOT re-score anything
 
@@ -395,19 +405,31 @@ Scan time is almost entirely the model writing its answer — the pipeline aroun
 costs about **6ms per card**, so nothing local is worth optimising. The levers that
 matter are how much the model has to write, and how many cards are in flight.
 
-**Scoring detail** (Settings, or `--fast` on the CLI):
+Two buttons at the top, one per kind of scan:
 
 | | |
 |---|---|
-| **Full critique** | The complete rubric: a score plus strengths, weaknesses and suggestions for every field, three priority improvements and a summary. ~15x more output per card. |
-| **Fast** | Every field still gets a real score, judged by the same standard — the model just doesn't write the prose. |
+| **Fast score** | Every card with no score yet. Every field still gets a real score, judged by the same standard — the model just doesn't write the prose. Several times quicker. |
+| **Full critique** | Every card without a critique yet — never scored, failed, or fast-scored. The complete rubric: a score plus strengths, weaknesses and suggestions for every field, three priority improvements and a summary. ~15x more output per card. |
 
-The recommended way to work through a big collection is **fast first**: score
-everything, delete what's bad, group the duplicates and keep the best — none of which
-needs the written critique. Then open the cards you're keeping and press **Rescore with
-full critique** for the feedback that actually drives an improvement. Opening a single
-card always asks for the full critique, whatever the scan setting is, and the
-**Fast-scored (no critique yet)** filter finds every card still waiting for one.
+The same two buttons appear in the selection bar for hand-picked cards.
+
+**The two-pass way through a big collection:**
+
+1. **Fast score** — the whole library, quickly.
+2. Cull — click the 1–3 bars in the score distribution (or filter *Score below 4*),
+   **Select all shown → Delete selected**; group duplicates and keep the best. None of
+   this needs the written critique.
+3. **Full critique** — now only the keepers are left without one, so that's all it
+   spends requests on. Press it again later and it does nothing — everything has one.
+4. **Improve with AI** on the cards worth it — the critique feeds the ideas, the ideas
+   you tick feed the rewrite.
+
+The **Fast-scored (no critique yet)** filter shows what step 3 will do. Opening one card
+and pressing **Rescore with full critique** does the same for just that card.
+
+The Settings option *Detail for "Rescore all" and the command line* only decides
+**More → Rescore all** and `node src/cli.js scan` (which also takes `--fast` / `--full`).
 
 Fast mode does *not* lower the standard: it keeps the same "never judge by length, call
 out padding" instruction and is explicitly told not to be generous, because the numbers
@@ -474,8 +496,9 @@ processed too.
    list** and pick a model from the dropdown, then **Save settings** again.
 5. Click **More → Change folder** and browse to wherever you put your card PNGs (e.g. your
    SillyTavern `data/default-user/characters` folder). Click **Use this folder**.
-6. Click **Scan unscored**. Sort by **Score: low → high** once it's done to find your
-   worst cards first.
+6. Click **Fast score**. Sort by **Score: low → high** once it's done to find your
+   worst cards first, delete what you don't want, then click **Full critique** for
+   written feedback on the ones you kept.
 
 Everything else below applies the same way on Windows, macOS, or Linux — the batch file
 is just a shortcut around the same `npm install` / `npm run serve` commands, and the
@@ -491,7 +514,7 @@ Settings/folder pickers mean you never actually need to hand-edit `config.json`.
    skipped on the next run unless the card file changed (content hash) or you pass
    `--rescore`; a card that **failed** (network error, bad response, rate limit
    exhausted) is *not* skipped — it's automatically retried the next time you run `scan`
-   or click "Scan unscored," no flag needed.
+   or click **Fast score** / **Full critique**, no flag needed.
 2. `serve` starts a local dashboard (`http://localhost:4180`) where you see every card's
    thumbnail and score at a glance, sort/filter by score or token count, open a card for
    the full breakdown, and delete (→ trash, reversible) or bulk-delete cards you decide
@@ -585,7 +608,7 @@ it is what risks your key, which is why the clamp and pacing exist.
 
 Hitting your own **credit/token quota** is a different thing entirely and is nothing to
 worry about: the provider returns a 429 with a long `Retry-After` (i.e. "resets at
-midnight"), those cards get marked failed, the run continues, and **Scan unscored**
+midnight"), those cards get marked failed, the run continues, and pressing the same scan button again
 picks them all up once your quota resets.
 
 (If you'd rather configure by hand: same fields, in `config.json` — `charactersDir`,
@@ -611,7 +634,7 @@ node src/cli.js stats
 
 `stats` shows the score distribution across everything cached so far. Once you're happy
 with the output quality, either keep running `scan` in batches, or just open the
-dashboard and use "Scan unscored" there — same underlying cache, so nothing gets
+dashboard and use **Fast score** or **Full critique** there — same underlying cache, so nothing gets
 double-scored.
 
 ```bash
@@ -631,7 +654,7 @@ Open `http://localhost:4180`. From there:
   (top-left of each tile) for one-off picks.
   Deleting moves the PNG/JSON files to `data/trash/`; it does not permanently delete
   them. Use **More → Trash** to restore a card or permanently empty the trash.
-- **Scan unscored** / **Rescore all** trigger a batch job in the background and open a
+- **Fast score** / **Full critique** / **Rescore all** trigger a batch job in the background and open a
   live panel showing: how many cards **scored** vs **failed** (counted separately, so a
   failing run can't masquerade as a slow one), how many requests are **in flight** right
   now out of your concurrency limit, the current **rate/hour**, **median** request time,
@@ -739,7 +762,7 @@ A couple of things worth doing once you're serving beyond localhost:
 - **Firewall**, if the box runs one (e.g. `ufw`): allow the port only on the Tailscale
   interface rather than opening it broadly — `sudo ufw allow in on tailscale0 to any port 4180`.
 
-You still run `scan` the same way on that box (or via the dashboard's "Scan unscored"),
+You still run `scan` the same way on that box (or via the dashboard's **Fast score** / **Full critique**),
 it just now has direct, fast local disk access to the real characters folder instead of
 going over the network for every card.
 

@@ -13,7 +13,10 @@
     <span id="dirLabel" class="dir-label"></span>
   </div>
   <div class="topbar-actions">
-    <button id="scanUnscoredBtn" class="primary" title="Scores every card with no score yet, including any that failed last time — no need to rescore everything.">Scan unscored</button>
+    <div class="scan-choices" role="group" aria-label="Scan cards">
+      <button id="fastScanBtn" class="primary" title="Scores every card that has no score yet — numbers only, several times quicker. Use it first, then delete what you don't want.">Fast score</button>
+      <button id="critiqueScanBtn" class="primary" title="Score plus written strengths, weaknesses and suggestions for every card that doesn't have a critique yet — including fast-scored ones. Slower; best after culling.">Full critique</button>
+    </div>
     <button id="promptsBtn" class="secondary">Prompts</button>
     <button id="settingsBtn" class="secondary">Settings</button>
     <div class="menu">
@@ -108,7 +111,8 @@
   <button id="selectAllShownBtn" class="secondary">Select all shown</button>
   <button id="selectDupeLosersBtn" class="secondary hidden" title="Selects every duplicate except the highest-scoring one in each group.">Select all but the best of each</button>
   <span id="selectionCount"></span>
-  <button id="scoreSelectedBtn" class="hidden">Score selected</button>
+  <button id="scoreSelectedBtn" class="hidden" title="Scores only — quick. For a first pass over many cards.">Fast score</button>
+  <button id="critiqueSelectedBtn" class="hidden" title="Score plus written strengths, weaknesses and suggestions for every field. Slower; for the cards you're keeping.">Full critique</button>
   <button id="copySelectedBtn" class="secondary hidden" title="Copies the selected cards into another folder. Originals stay exactly where they are.">Copy selected to…</button>
   <button id="deleteSelectedBtn" class="danger hidden">Delete selected</button>
   <button id="clearSelectionBtn" class="secondary hidden">Clear</button>
@@ -229,14 +233,14 @@
 
   <h3 class="settings-section">Scanning</h3>
   <div class="settings-field">
-    <label for="settingsDetail">Scoring detail</label>
+    <label for="settingsDetail">Detail for “Rescore all” and the command line</label>
     <select id="settingsDetail">
       <option value="full">Full critique — score + strengths, weaknesses and suggestions per field</option>
       <option value="fast">Fast — scores only (several times quicker)</option>
     </select>
-    <p class="folder-hint">Scanning time is almost entirely the model writing its answer, so asking for the
-    numbers alone is far quicker per card. Good for a first pass over thousands of cards: cull by score, then
-    open any card you want to keep and press <b>Rescore with full critique</b> for the written feedback.</p>
+    <p class="folder-hint">The <b>Fast score</b> and <b>Full critique</b> buttons always do what they say, whatever
+    this is set to. This only decides <b>More → Rescore all</b> and <code>node src/cli.js scan</code>
+    (which also take <code>--fast</code> / <code>--full</code>).</p>
   </div>
 
   <div class="settings-field">

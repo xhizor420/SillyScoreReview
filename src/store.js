@@ -18,6 +18,8 @@ export class Store {
     this.data = { version: 1, charactersDir: charactersDir ?? null, cards: {} };
     this._writeQueue = Promise.resolve();
     this._timer = null;
+    this._version = 0;      // bumped by every change
+    this._savedVersion = 0; // the change count the last completed write included
     // Above this many cards a full rewrite stops being free (a 3,765-card cache
     // is ~9MB, so JSON.stringify alone blocks the event loop for ~70ms), so
     // writes get coalesced instead of fired per card. Below it, write at once:
@@ -52,6 +54,7 @@ export class Store {
    */
   set(key, value) {
     this.data.cards[key] = value;
+    this._version++;
     return this._scheduleSave();
   }
 
@@ -63,6 +66,7 @@ export class Store {
    */
   stage(key, value) {
     this.data.cards[key] = value;
+    this._version++;
   }
 
   /** Writes whatever has been staged, now. */
@@ -81,6 +85,7 @@ export class Store {
 
   delete(key) {
     delete this.data.cards[key];
+    this._version++;
     return this._scheduleSave();
   }
 
@@ -91,6 +96,7 @@ export class Store {
    */
   stageDelete(key) {
     delete this.data.cards[key];
+    this._version++;
   }
 
   /**
@@ -138,8 +144,15 @@ export class Store {
   async _save() {
     await mkdir(dirname(this.filePath), { recursive: true });
     const tmp = `${this.filePath}.tmp`;
+    const version = this._version;
     await writeFile(tmp, JSON.stringify(this.data, null, 2));
     await rename(tmp, this.filePath);
+    this._savedVersion = version;
+  }
+
+  /** True when something changed after the last completed write began. */
+  get hasUnsavedChanges() {
+    return this._version !== this._savedVersion;
   }
 }
 
@@ -157,8 +170,18 @@ export function flushOnExit(store) {
   exitStores.add(store);
   if (exitHooked) return;
   exitHooked = true;
+  // Requests already in flight keep finishing while the final write runs, and
+  // each one is reported done the moment it lands. So flush until a write
+  // completes with nothing newer behind it — otherwise the last card or two to
+  // finish would be printed as scored but lost.
+  const settle = async (st) => {
+    for (let i = 0; i < 10; i++) {
+      await st.flush();
+      if (!st.hasUnsavedChanges) return;
+    }
+  };
   const finish = (signal) => {
-    Promise.allSettled([...exitStores].map((st) => st.flush()))
+    Promise.allSettled([...exitStores].map(settle))
       .finally(() => process.exit(signal === 'SIGINT' ? 130 : 0));
   };
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {

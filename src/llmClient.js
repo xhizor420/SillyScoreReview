@@ -283,8 +283,10 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
         // field (reasoning_content / reasoning) and only the answer here;
         // others put "<think>…</think>" in front of the answer in this field.
         // Either way the reasoning is not the answer — the JSON reader strips
-        // inline think blocks, and the separate field is only measured.
+        // inline think blocks, and the separate field is only measured (and
+        // shown when you test a prompt, so you can see how the model got there).
         content: message.content || '',
+        reasoning: message.reasoning_content || message.reasoning || '',
         reasoningChars: (message.reasoning_content || message.reasoning || '').length,
         finishReason: json.choices?.[0]?.finish_reason ?? null,
         usage: json.usage ?? null,

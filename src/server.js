@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from './llmClient.js';
-import { scoreCard, buildScoringPrompts } from './scorer.js';
+import { scoreCard, buildScoringPrompts, ask } from './scorer.js';
 import { improveCard, buildImprovePrompts, generateIdeas, buildIdeasPrompts } from './improver.js';
 import {
   PROMPT_KINDS, DEFAULT_PROMPTS, instructionsFor, systemPrompt, promptHash,
@@ -482,10 +482,17 @@ export async function startServer(config) {
           const entry = store.get(f);
           return !entry || entry.error;
         });
+      } else if (scope === 'uncritiqued') {
+        // Everything still waiting for a written critique: never scored, failed,
+        // or only fast-scored. The second pass after fast-scoring and culling.
+        files = all.filter((f) => {
+          const entry = store.get(f);
+          return !entry || entry.error || !entry.result || entry.result.brief;
+        });
       } else {
         files = all;
       }
-      if (!rescore) {
+      if (!rescore && scope !== 'uncritiqued') {
         files = files.filter((f) => {
           const entry = store.get(f);
           return !entry || entry.error;
@@ -1077,6 +1084,28 @@ export async function startServer(config) {
     return files.find((f) => store.get(f)?.result && !store.get(f).result.partial) || files[0];
   }
 
+  /**
+   * The provider, with each reply copied into `replies` as it arrives: the raw
+   * text (thinking included, if the model put it inline), any separate
+   * reasoning, why it stopped, and the token counts the provider reported.
+   */
+  function recordingProvider(provider, replies) {
+    const wrapped = Object.create(provider);
+    wrapped.chatWithMeta = async (args) => {
+      const reply = await ask(provider, args);
+      replies.push({
+        content: reply.content ?? '',
+        reasoning: reply.reasoning || '',
+        finishReason: reply.finishReason ?? null,
+        usage: reply.usage ?? null,
+        latencyMs: reply.latencyMs ?? null,
+      });
+      return reply;
+    };
+    wrapped.chat = async (args) => (await wrapped.chatWithMeta(args)).content;
+    return wrapped;
+  }
+
   // Exactly what would be sent for this card — system and user message — with
   // no request made. Works with unsaved edits.
   app.post('/api/prompts/preview', async (req, res) => {
@@ -1115,12 +1144,15 @@ export async function startServer(config) {
       const problems = validateInstructions(kind, instructions);
       if (problems.length) return res.status(400).json({ error: problems.join(' ') });
     }
+    const replies = [];
     try {
       const file = await sampleCardFile(cardId);
       if (!file) return res.status(400).json({ error: 'There are no cards in this folder to test with.' });
       const { card } = await readCardOrThrow(file);
       const store = await getStore(config.charactersDir);
-      const provider = getProvider();
+      // Record every reply exactly as it arrived, so the panel can show what
+      // the model actually sent back — most useful when it couldn't be read.
+      const provider = recordingProvider(getProvider(), replies);
       const started = Date.now();
       let output;
       if (kind === 'improve') {
@@ -1136,9 +1168,10 @@ export async function startServer(config) {
         tookMs: Date.now() - started,
         currentScore: store.get(file)?.result?.overall_score ?? null,
         output,
+        replies,
       });
     } catch (err) {
-      res.status(500).json({ error: err.message, kind: classifyError(err.message) });
+      res.status(500).json({ error: err.message, kind: classifyError(err.message), replies });
     }
   });
 
