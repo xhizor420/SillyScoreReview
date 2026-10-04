@@ -44,6 +44,11 @@
   <div id="distTooltip" class="dist-tooltip hidden" role="status"></div>
 </section>
 
+<div id="calibration" class="calibration hidden" role="status">
+  <span id="calibrationText"></span>
+  <button id="calibrationShowBtn" class="secondary small hidden">Show them</button>
+</div>
+
 <div id="staleNotice" class="stale-notice hidden" role="status">
   <span id="staleText"></span>
   <button id="updateStaleBtn" class="primary" title="Redoes each of these the way it was made — fast stays fast, a full critique stays a full critique. Your scores are backed up first.">Update all</button>
@@ -65,6 +70,7 @@
     <option value="below6">Score below 6</option>
     <option value="scored">Scored only</option>
     <option value="fast-scored">Fast-scored (no critique yet)</option>
+    <option value="fast-gap">Fast and full disagree by over a point</option>
     <option value="prompt-stale">Scored with an older prompt</option>
     <option value="duplicates">Possible duplicates</option>
   </select>

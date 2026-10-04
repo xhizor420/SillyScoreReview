@@ -1878,6 +1878,11 @@ async function testTwoPassAndRawReplies() {
     const { cards } = await (await fetch(`${base}/api/cards`)).json();
     assert.ok(cards.every((c) => c.overallScore === 6 && !c.brief));
     console.log('✓ Fast score then Full critique: the second pass critiques only the 5 cards without one, then has nothing left');
+    // Fast vs full: each critiqued card remembers the fast score it replaced.
+    assert.ok(cards.every((c) => c.fastScore === 5 && c.fastScoreStale === false), 'the fast score is kept beside the full critique');
+    const detailRes = await (await fetch(`${base}/api/cards/card-1.png`)).json();
+    assert.deepEqual(detailRes.entry.fastScore.fields, { description: 5 }, 'per field, too');
+    console.log('✓ a full critique keeps the fast score it replaced (overall and per field), so fast scoring can be checked against it');
 
     // "Update old scores": after the prompts change, every stale score is
     // redone the way it was made — fast stays fast, full stays full.
@@ -1896,6 +1901,8 @@ async function testTwoPassAndRawReplies() {
     listed = (await (await fetch(`${base}/api/cards`)).json()).cards;
     assert.equal(listed.filter((c) => c.promptStale).length, 0, 'nothing left on an older prompt');
     assert.equal(listed.find((c) => c.id === 'card-2.png').brief, true, 'the fast-scored card is still a fast score');
+    assert.equal(listed.find((c) => c.id === 'card-2.png').fastScore, null, 'a fast score has nothing to compare against');
+    assert.ok(listed.filter((c) => !c.brief).every((c) => c.fastScoreStale === true), 'after a prompt change the old fast score is marked an unfair comparison');
     const again2 = await post('/api/score/batch', { scope: 'stale', rescore: true, detail: 'same' });
     assert.equal(again2.total, 0, 'pressing it again has nothing to do');
     await finish(again2.jobId);

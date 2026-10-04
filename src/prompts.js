@@ -124,8 +124,12 @@ ${TOP_TIER}
 ${SCALE}
 
 Judge depth, not length: specific, usable detail is a strength however much of it there is; repetition, filler, \
-generic phrasing and contradictions between fields are the faults. A field that contradicts the description (a \
-different height, colour, body or personality) scores lower for it.
+generic phrasing and contradictions between fields are the faults.
+
+Before scoring, check every field against the description the way a full critique would: the same height, colours, \
+body, hands and feet, clothing, powers and personality? A field that contradicts the description scores lower for \
+it, however well it is written — the model would flip between the two versions mid-chat. You write no critique \
+here, but think it through as carefully as if you did.
 
 Apply exactly the standard you would if you were writing out the full critique. Do not be generous: the scores are \
 used to find the best cards and decide which get deleted.`;

@@ -25,6 +25,9 @@ const els = {
   filterBy: document.getElementById('filterBy'),
   fastScanBtn: document.getElementById('fastScanBtn'),
   staleNotice: document.getElementById('staleNotice'),
+  calibration: document.getElementById('calibration'),
+  calibrationText: document.getElementById('calibrationText'),
+  calibrationShowBtn: document.getElementById('calibrationShowBtn'),
   staleText: document.getElementById('staleText'),
   updateStaleBtn: document.getElementById('updateStaleBtn'),
   critiqueScanBtn: document.getElementById('critiqueScanBtn'),
@@ -320,6 +323,33 @@ function renderStaleNotice() {
   els.updateStaleBtn.textContent = `Update ${stale.length === 1 ? 'it' : `all ${stale.length.toLocaleString()}`}`;
 }
 
+/** Full critique minus the fast score it replaced (same prompt version), or null. */
+function fastGap(card) {
+  if (card.fastScore == null || card.fastScoreStale || card.brief || card.overallScore == null) return null;
+  return Math.round((card.overallScore - card.fastScore) * 10) / 10;
+}
+
+/**
+ * Do fast scores land where full critiques do? Every card that was fast-scored
+ * and later fully critiqued is a data point, on your own model. Fast scores
+ * decide what gets culled, so this is the number that says whether to trust
+ * them — measured, not assumed.
+ */
+function renderCalibration() {
+  const gaps = state.cards.map(fastGap).filter((g) => g != null);
+  els.calibration.classList.toggle('hidden', gaps.length === 0);
+  if (!gaps.length) return;
+  const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  const far = gaps.filter((g) => Math.abs(g) > 1).length;
+  const drift = Math.abs(mean) < 0.15
+    ? 'they agree on average'
+    : `full critiques average ${Math.abs(mean).toFixed(1)} ${mean < 0 ? 'lower' : 'higher'} than fast`;
+  els.calibrationText.textContent = `Fast vs full, on ${gaps.length} card${gaps.length === 1 ? '' : 's'}: ${drift}; ` +
+    (far ? `${far} differ${far === 1 ? 's' : ''} by more than a point.` : 'none differ by more than a point.');
+  els.calibrationShowBtn.classList.toggle('hidden', far === 0);
+  els.calibration.classList.toggle('tone-warn', far > 0 && far / gaps.length > 0.2);
+}
+
 /**
  * The numbers a culling session starts from, as a row of stat tiles. Each one
  * that names a set of cards is also a shortcut to that set.
@@ -333,6 +363,7 @@ function renderStats() {
   const stale = state.cards.filter((c) => c.promptStale).length;
   const avg = scored ? (scoredCards.reduce((sum, c) => sum + c.overallScore, 0) / scored).toFixed(1) : '—';
   renderStaleNotice();
+  renderCalibration();
 
   const tiles = [
     { value: total.toLocaleString(), label: 'cards', filter: 'all' },
@@ -454,6 +485,7 @@ function passesFilter(card) {
   if (f === 'below6') return card.overallScore != null && card.overallScore < 6;
   if (f === 'scored') return card.overallScore != null;
   if (f === 'fast-scored') return card.brief === true;
+  if (f === 'fast-gap') return fastGap(card) != null && Math.abs(fastGap(card)) > 1;
   return true;
 }
 
@@ -725,6 +757,21 @@ function renderSelectionBar() {
   els.critiqueSelectedBtn.textContent = n ? `Full critique (${n})` : 'Full critique';
 }
 
+/** "Fast score was 8.9 → full critique 8.4", with the fields that moved. */
+function fastComparisonHtml(entry, result) {
+  const fast = entry?.fastScore;
+  if (!fast || !result || result.brief || !Number.isFinite(fast.overall)) return '';
+  const diff = Math.round((result.overall_score - fast.overall) * 10) / 10;
+  const moved = Object.entries(result.fields || {})
+    .filter(([f, v]) => Number.isFinite(fast.fields?.[f]) && Number.isFinite(v.score) && fast.fields[f] !== v.score)
+    .map(([f, v]) => `${escapeHtml(fieldLabel(f))} ${fast.fields[f]} → ${v.score}`);
+  return `<div class="fast-compare ${Math.abs(diff) > 1 && !fast.stale ? 'is-far' : ''}">
+    Fast score was <b>${fast.overall}</b> → full critique <b>${result.overall_score}</b>
+    (${diff === 0 ? 'the same' : `${diff > 0 ? '+' : ''}${diff}`})${moved.length ? ` · ${moved.join(' · ')}` : ''}
+    ${fast.stale ? '<span class="dim"> — the fast score was made with an older prompt, so this isn\'t a fair comparison</span>' : ''}
+  </div>`;
+}
+
 async function openCard(id) {
   const data = await api(`/api/cards/${encodeURIComponent(id)}`);
   const entry = data.entry;
@@ -765,6 +812,7 @@ async function openCard(id) {
           : `<div>${escapeHtml(result.summary || '')}</div>`}
       ${result.top_priority_improvements?.length ? `<ol class="priority-list">${result.top_priority_improvements.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ol>` : ''}
     </div>`;
+    html += fastComparisonHtml(entry, result);
 
     for (const [field, f] of Object.entries(result.fields)) {
       const hasCritique = f.strengths || f.weaknesses || f.suggestions;
@@ -1122,6 +1170,10 @@ els.fastScanBtn.addEventListener('click', () => {
     return;
   }
   startBatch({ scope: 'unscored', detail: 'fast' });
+});
+els.calibrationShowBtn.addEventListener('click', () => {
+  els.filterBy.value = 'fast-gap';
+  els.filterBy.dispatchEvent(new Event('change'));
 });
 els.updateStaleBtn.addEventListener('click', () => {
   const stale = state.cards.filter((c) => c.promptStale);

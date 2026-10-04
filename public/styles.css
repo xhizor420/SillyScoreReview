@@ -727,6 +727,14 @@ body.select-mode .card-checkbox { width: 26px; height: 26px; }
   .stale-notice button { width: 100%; min-height: 42px; }
 }
 
+/* ---- fast vs full: does fast scoring put cards where full critiques do? ---- */
+.calibration { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 20px 0; font-size: 12.5px; color: var(--text-dim); }
+.calibration.tone-warn { color: var(--yellow); }
+.fast-compare { margin: 8px 0 12px; padding: 6px 10px; border-radius: 6px; font-size: 13px; background: var(--panel-2); }
+.fast-compare.is-far { background: rgba(224,178,58,0.12); color: var(--yellow); }
+.fast-compare .dim { color: var(--text-dim); }
+@media (max-width: 760px) { .calibration { margin: 8px 12px 0; } }
+
 /* ---- Improve with AI: kinds of change, the canon, and the change review ---- */
 .pill.kind-pill { font-weight: 700; letter-spacing: 0.01em; }
 .pill.kind-fix { background: rgba(224,178,58,0.16); color: var(--yellow); }

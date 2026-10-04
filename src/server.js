@@ -103,6 +103,8 @@ export async function startServer(config) {
       previousScore: entry?.previousScore ?? null,
       improvedFrom: entry?.improvedFrom ?? null,
       brief: Boolean(entry?.result?.brief),
+      fastScore: entry?.result && !entry.result.brief ? entry?.fastScore?.overall ?? null : null,
+      fastScoreStale: Boolean(entry?.fastScore?.stale),
       promptStale: isPromptStale(entry),
       isImage: /\.png$/i.test(file),
     };
@@ -161,6 +163,12 @@ export async function startServer(config) {
         result,
         error: null,
       };
+      // When a full critique replaces a fast score, keep the fast one beside it.
+      // Fast scores decide what gets culled, so it matters whether they land
+      // where the full critique does — this is how you find out, on your own
+      // model, card by card.
+      const fastScore = detail === 'fast' ? null : fastScoreToKeep(store.get(file), hash);
+      if (fastScore) entry.fastScore = fastScore;
       // Not awaited: the entry is in memory immediately and the write is
       // coalesced with the other cards finishing around it. Every path that
       // ends a run flushes, so nothing is left unwritten.
@@ -195,6 +203,25 @@ export async function startServer(config) {
       store.set(file, entry);
       throw err;
     }
+  }
+
+  /** The fast score worth keeping from `previous` when a full critique replaces it. */
+  function fastScoreToKeep(previous, hash) {
+    if (!previous || previous.hash !== hash) return null; // a different card text: not comparable
+    const r = previous.result;
+    if (r?.brief && Number.isFinite(r.overall_score)) {
+      return {
+        overall: r.overall_score,
+        fields: Object.fromEntries(Object.entries(r.fields || {}).map(([f, v]) => [f, v?.score ?? null])),
+        at: previous.scoredAt ?? null,
+        // A fast score from an older prompt isn't a fair comparison.
+        stale: isPromptStale(previous),
+      };
+    }
+    // A later full rescore keeps the comparison — marked unfair once the
+    // prompts have changed since the fast score was made.
+    if (!previous.fastScore) return null;
+    return { ...previous.fastScore, stale: Boolean(previous.fastScore.stale || isPromptStale(previous)) };
   }
 
   const app = express();

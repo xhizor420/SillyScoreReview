@@ -480,6 +480,15 @@ The same two buttons appear in the selection bar for hand-picked cards.
 4. **Improve with AI** on the cards worth it — the critique feeds the ideas, the ideas
    you tick feed the edits.
 
+**Is fast scoring putting cards in the right place?** Measured, not assumed: when a
+full critique replaces a fast score, the fast one is kept beside it. A line under the
+stats sums it up on your own model — *"Fast vs full, on 40 cards: full critiques average
+0.2 lower than fast; 1 differs by more than a point"* — with **Show them** for the cards
+where the two disagree, and each card shows *"Fast score was 8.9 → full critique 8.4 ·
+first mes 9 → 7"*. Critique a handful of cards you know well first: if fast and full
+agree, cull by fast scores with confidence; if they don't, critique before you delete.
+(Fast scores made with an older prompt aren't counted — that wouldn't be a fair test.)
+
 The **Fast-scored (no critique yet)** filter shows what step 3 will do. Opening one card
 and pressing **Rescore with full critique** does the same for just that card.
 
