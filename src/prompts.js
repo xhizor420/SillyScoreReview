@@ -20,6 +20,10 @@ const FULL_INSTRUCTIONS = `You are a critical, experienced editor for SillyTaver
 You judge how well each field will drive an LLM to play this character well, scene after scene: writing quality, \
 specificity, clarity, voice, and consistency across the whole card.
 
+THE BAR IS 10/10: a card a skilled writer would hold up as an example — a character the model can play vividly and \
+consistently, in its own voice, for hundreds of messages. Score against that bar, and make every suggestion a step \
+toward it.
+
 JUDGE DEPTH, NOT LENGTH. Detail that gives the model something specific to play — a look it can describe the same \
 way every time, behaviours, speech patterns, goals and motivation, relationships, rules of the world, hooks for \
 {{user}} — is depth, and a rich card earns credit for it. Length on its own is never a fault, and a short card is \
@@ -28,8 +32,7 @@ phrasing that could describe any character, traits that are only asserted and ne
 model cannot act on.
 
 CHECK CONSISTENCY ACROSS THE WHOLE CARD. The description is the reference for who the character is and what they \
-look like. The first message, example dialogue, scenario, character_note and lorebook (when shown) must agree with \
-it. Name every contradiction with both versions — height, colours, body, clothing, powers, setting facts, how they \
+look like. The first message, example dialogue, scenario and character_note must agree with it. Name every contradiction with both versions — height, colours, body, clothing, powers, setting facts, how they \
 treat {{user}}. Contradictions make the model flip between versions mid-chat, and they are among the most damaging \
 faults a rich card can have.
 
@@ -47,11 +50,11 @@ For each field:
 1. Score (1-10)
 2. Strengths - What works well
 3. Weaknesses - What needs improvement (name contradictions with both versions)
-4. Suggestions - Concrete changes that keep the character
+4. Suggestions - Concrete changes that would take this field to 10/10 while keeping the character
 
 Then provide:
 - Overall Score (weighted average)
-- Top 3 Priority Improvements
+- Top 3 Priority Improvements (the changes that would raise the card most)
 - Summary
 
 Be critical but constructive. Specific, actionable feedback only — one or two sentences per entry.`;
@@ -115,29 +118,24 @@ const IMPROVE_FORMAT = `Respond with ONLY a single valid JSON object (no markdow
   "edits": [
     {
       "idea": <the number of the chosen change this edit carries out>,
-      "field": "<field name, or lorebook:N for lorebook entry N>",
-      "action": "replace" | "insert_after" | "insert_before" | "disable",
+      "field": "<field name>",
+      "action": "replace" | "insert_after" | "insert_before",
       "find": "<a passage copied exactly from that field>",
       "text": "<the new text>",
       "why": "<one short sentence>"
     }
   ],
-  "new_lorebook_entries": [
-    { "keys": ["<word that should bring this up>", "<another>"], "content": "<the moved text, in the card's own words>" }
-  ],
   "headline": "<one sentence on the overall change>"
 }
-"replace": "text" takes the place of "find" (use "" only when the chosen change is to remove or move that passage). \
+"replace": "text" takes the place of "find" (use "" only when the chosen change is to remove that passage). \
 "insert_after" / "insert_before": "text" is added right after / before "find", which stays; start or end "text" \
-with the space or line break it needs. "disable": switch off lorebook entry N (for a duplicate or retired entry); \
-leave "find" and "text" empty — entries are never deleted. One chosen change may need several edits, in different \
-places or fields. Only fill "new_lorebook_entries" when a chosen change moves detail into a new lorebook entry; \
-moved text keeps the card's own wording.`;
+with the space or line break it needs. One chosen change may need several edits, in different places or fields.`;
 
 // ---- improvement ideas: the step between rating and rewriting ----
 
 const IDEAS_INSTRUCTIONS = `You are a senior editor for SillyTavern character cards. The card below has been \
-rated. Your job now is to propose specific improvements the owner can choose from. Do not rewrite anything yet.
+rated. Your job now is to propose the specific improvements that would take it to a 10/10 while it stays exactly \
+the same character, for the owner to choose from. Do not rewrite anything yet.
 
 STEP 1 — CANON. First record what makes this card itself, by aspect: look (body, face, colours, size, clothing, \
 distinguishing marks), personality, voice (how they talk, pet names, verbal habits), goals, relationships \
@@ -150,21 +148,16 @@ STEP 2 — IDEAS. Then propose improvements. Each has a kind:
 - "fix": a contradiction or error. Quote both versions. The part that disagrees with the canon changes to match it.
 - "combine": details about the same thing are scattered or said twice; merge them into one stronger passage that \
 keeps every detail from each.
-- "extend": a thin spot where a little more would help the model play the character — a concrete behaviour, a \
-sensory detail, a reaction, a line of dialogue in their voice, a rule of the world. Build only on what the card \
+- "extend": a thin spot where more would help the model play the character — a concrete behaviour, a sensory \
+detail, a reaction, a line of dialogue in their voice, a rule of the world. Build only on what the card \
 establishes: never invent backstory, powers, relatives or plot twists.
-- "move": detail that matters only in some scenes moves from an always-sent field into a new lorebook entry (only \
-when the card supports a lorebook). Nothing is lost.
-- "trim": only for true repetition, or reader-facing text (credits, links, update notes) inside a prompt field. Say \
-where the detail remains. Never trim a distinctive detail.
-- "lorebook": a problem with an existing lorebook entry — a duplicate (merge what is unique into one entry and \
-switch the others off), an entry that contradicts the canon (update it to match), a mislabelled entry, keys that \
-fire on nearly every message, or a memory from one past chat (dates, a named user) that does not belong in a card \
-people start new chats with. Use field "lorebook:N" for entry N.
+- "trim": only for true repetition, or reader-facing text (credits, links, update notes) inside the card. Say where \
+the detail remains. Never trim a distinctive detail.
 
 A rich card rarely needs cutting. Look for what would make its depth work better: contradictions between the \
-description, the greeting and the lorebook; scattered details that would be stronger together; traits that are \
-told but never shown; a greeting or example that drifts from the canon look or voice.
+description, the greeting and the examples; scattered details that would be stronger together; traits that are \
+told but never shown; a greeting or example that drifts from the canon look or voice; a goal or relationship the \
+card names but never gives the model a way to play.
 
 Also check the card against the Character Card V2 spec and SillyTavern practice:
 - system_prompt and post_history_instructions REPLACE the user's own system prompt and jailbreak unless they \
@@ -175,7 +168,7 @@ near-copy of first_mes.
 - The first message and example dialogue should not speak, act or decide for {{user}}.
 
 For each idea, "quotes" lists the exact passages it changes or relies on, copied from the card. Rate impact \
-honestly, and say plainly how an idea could change the card's feel.`;
+honestly — how much closer it brings the card to a 10/10 — and say plainly how an idea could change the card's feel.`;
 
 const IDEAS_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary) in exactly this shape:
 {
@@ -184,8 +177,8 @@ const IDEAS_FORMAT = `Respond with ONLY a single valid JSON object (no markdown 
   ],
   "ideas": [
     {
-      "kind": "fix" | "combine" | "extend" | "move" | "trim" | "lorebook",
-      "field": "<field name, or lorebook:N>",
+      "kind": "fix" | "combine" | "extend" | "trim",
+      "field": "<field name>",
       "title": "<5-8 word title>",
       "change": "<the specific change to make>",
       "why": "<what it fixes or adds>",
@@ -195,8 +188,7 @@ const IDEAS_FORMAT = `Respond with ONLY a single valid JSON object (no markdown 
     }
   ]
 }
-Use only the field names given below, or lorebook:N for an entry listed below. Up to 20 canon facts. Give 3 to 10 \
-ideas, highest impact first.`;
+Use only the field names given below. Up to 20 canon facts. Give 3 to 10 ideas, highest impact first.`;
 
 export const PROMPT_KINDS = {
   full: {
@@ -213,7 +205,7 @@ export const PROMPT_KINDS = {
   },
   ideas: {
     label: 'Improvement ideas',
-    description: 'Step 2 of "Improve with AI": reads the card, its full critique (written first if the card only has a fast score) and its lorebook; records the canon — what makes the character itself, with quotes — and proposes specific fixes, combinations and extensions for you to choose from. Nothing is changed here.',
+    description: 'Step 2 of "Improve with AI": reads the card and its full critique (written first if the card only has a fast score); records the canon — what makes the character itself, with quotes — and proposes specific fixes, combinations and extensions for you to choose from. Nothing is changed here.',
     defaultInstructions: IDEAS_INSTRUCTIONS,
     format: IDEAS_FORMAT,
   },
@@ -272,7 +264,7 @@ export function validateInstructions(kind, text) {
   if (!PROMPT_KINDS[kind]) problems.push(`Unknown prompt "${kind}".`);
   if (typeof text !== 'string' || !text.trim()) problems.push('The instructions are empty. Use "Reset to default" instead of clearing them.');
   if (typeof text === 'string' && text.length > MAX_INSTRUCTIONS_CHARS) {
-    problems.push(`The instructions are ${text.length.toLocaleString()} characters; the limit is ${MAX_INSTRUCTIONS_CHARS.toLocaleString()}. Every card pays for this length in every request.`);
+    problems.push(`The instructions are ${text.length.toLocaleString()} characters; the limit is ${MAX_INSTRUCTIONS_CHARS.toLocaleString()}. Trim it, or split what matters most to the top.`);
   }
   return problems;
 }
@@ -295,9 +287,6 @@ export function adviseInstructions(kind, text) {
   const leniency = /\b(?<!(?:not|never|n't)\s+(?:be\s+)?)(lenient|generous|be kind|go easy)\b/i;
   if (kind !== 'improve' && leniency.test(text)) {
     notes.push('Lenient grading compresses scores toward the top, which makes it harder to tell which cards to delete.');
-  }
-  if (text.length > 6000) {
-    notes.push(`At ${text.length.toLocaleString()} characters, these instructions are sent with every card. Over a 3,000-card scan that adds up in time and cost.`);
   }
   return notes;
 }

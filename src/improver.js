@@ -1,15 +1,15 @@
-import { SCORABLE_FIELDS, estimateTokens } from './cardParser.js';
+import { SCORABLE_FIELDS } from './cardParser.js';
 import { DEFAULT_PROMPTS, systemPrompt } from './prompts.js';
 import { extractJsonObject } from './jsonExtract.js';
 import { ask, unusableAnswerError } from './scorer.js';
-import { lorebookEntries, lorebookContext, auditLorebook } from './lorebook.js';
 
 /**
  * Improving a card, in two model steps with you choosing in between:
  *
  * 1. Ideas — the model records the card's canon (what makes the character
- *    itself, each fact with a quote from the card) and proposes specific
- *    changes, each of a kind: fix, combine, extend, move, trim, lorebook.
+ *    itself, each fact with a quote from the card) and proposes the specific
+ *    changes that would take it to a 10/10, each of a kind: fix, combine,
+ *    extend, trim.
  * 2. Edits — the chosen ideas are carried out as precise, anchored edits:
  *    "replace this exact passage with…", "insert after this exact passage…".
  *
@@ -22,10 +22,11 @@ import { lorebookEntries, lorebookContext, auditLorebook } from './lorebook.js';
 // Kept for anything that imports it; the editable source is prompts.js.
 export const IMPROVE_SYSTEM_PROMPT = DEFAULT_PROMPTS.improve;
 
-export const IDEA_KINDS = ['fix', 'combine', 'extend', 'move', 'trim', 'lorebook'];
+// Card only: the lorebook is a separate job, for later.
+export const IDEA_KINDS = ['fix', 'combine', 'extend', 'trim'];
 const CANON_ASPECTS = ['look', 'personality', 'voice', 'goals', 'relationships', 'powers', 'setting', 'format'];
 const IMPACTS = ['high', 'medium', 'low'];
-const ACTIONS = ['replace', 'insert_after', 'insert_before', 'disable'];
+const ACTIONS = ['replace', 'insert_after', 'insert_before'];
 
 function critiqueFor(result, field) {
   const f = result?.fields?.[field];
@@ -37,16 +38,14 @@ function critiqueFor(result, field) {
   return bits.length ? bits.join('; ') : null;
 }
 
-/** V2/V3 cards have a lorebook (character_book) and extensions; flat V1 cards do not. */
-export function supportsLorebook(card) {
+/** V2/V3 cards keep their fields under `data` and have `extensions`; flat V1 cards do not. */
+export function isV2(card) {
   return Boolean(card?.raw?.data && typeof card.raw.data === 'object');
 }
 
-const LORE_RE = /^lorebook:(\d+)$/;
-
 /**
- * Everything an idea or edit can point at: the card's non-empty fields, and
- * (on cards that have one) each lorebook entry as "lorebook:N".
+ * Everything an idea or edit can point at: the card's own non-empty fields.
+ * Card only — the lorebook is not reviewed or edited here.
  */
 export function editTargets(card) {
   const targets = new Map();
@@ -54,15 +53,8 @@ export function editTargets(card) {
     const text = card.fields[field] || '';
     if (!text.trim()) continue;
     // V1 cards have nowhere to store a Character's Note.
-    if (field === 'character_note' && !supportsLorebook(card)) continue;
-    targets.set(field, { target: field, label: field.replace(/_/g, ' '), text });
-  }
-  if (supportsLorebook(card)) {
-    for (const e of lorebookEntries(card)) {
-      targets.set(`lorebook:${e.index}`, {
-        target: `lorebook:${e.index}`, label: `lorebook: ${e.title}`, text: e.content, entry: e,
-      });
-    }
+    if (field === 'character_note' && !isV2(card)) continue;
+    targets.set(field, { target: field, label: field === 'character_note' ? 'character\'s note' : field.replace(/_/g, ' '), text });
   }
   return targets;
 }
@@ -161,7 +153,7 @@ export function placeEdits(targets, edits, { allowed = null } = {}) {
       order,
       idea: Number.isInteger(raw.idea) ? raw.idea : Number.parseInt(raw.idea, 10) || null,
       target: String(raw.field ?? raw.target ?? '').trim(),
-      action: ACTIONS.includes(raw.action) ? raw.action : 'replace',
+      action: ACTIONS.includes(raw.action) ? raw.action : raw.action === 'disable' ? 'disable' : 'replace',
       find: String(raw.find ?? ''),
       text: String(raw.text ?? '').replace(/\r\n/g, '\n'),
       why: String(raw.why ?? '').trim(),
@@ -169,13 +161,8 @@ export function placeEdits(targets, edits, { allowed = null } = {}) {
     const t = targets.get(e.target);
     const fail = (reason) => unplaced.push({ ...e, reason });
     if (!t) return fail('it points at a part of the card that does not exist');
+    if (e.action === 'disable') return fail('it tries to switch something off — only card text is edited here');
     if (allowed && !allowed.has(e.target)) return fail('it changes a part of the card no chosen idea was about');
-    if (e.action === 'disable') {
-      if (!LORE_RE.test(e.target)) return fail('only lorebook entries can be switched off');
-      if (placed.some((p) => p.target === e.target && p.action === 'disable')) return fail('this entry is already being switched off');
-      placed.push({ ...e, start: 0, end: 0, old: '', new: '', anchor: '' });
-      return;
-    }
     const at = locate(t.text, e.find);
     if (at.error) return fail(at.error);
     let { start, end } = at;
@@ -196,7 +183,7 @@ export function placeEdits(targets, edits, { allowed = null } = {}) {
     }
     // Overlaps: two replacements of intersecting text, or an insert inside a
     // replaced passage, can't both apply. The first one placed wins.
-    const clash = placed.find((p) => p.target === e.target && p.action !== 'disable' && (
+    const clash = placed.find((p) => p.target === e.target && (
       (start < p.end && p.start < end) ||
       (start === end && p.start < start && start < p.end) ||
       (p.start === p.end && start < p.start && p.start < end)));
@@ -208,7 +195,7 @@ export function placeEdits(targets, edits, { allowed = null } = {}) {
 
 /** Applies placed edits to one target's text (all of them — the dashboard applies the ones you allow). */
 export function applyEdits(text, edits) {
-  const sorted = edits.filter((e) => e.action !== 'disable').sort((a, b) => a.start - b.start || a.order - b.order);
+  const sorted = [...edits].sort((a, b) => a.start - b.start || a.order - b.order);
   let out = '';
   let pos = 0;
   for (const e of sorted) {
@@ -235,25 +222,16 @@ export function buildIdeasPrompts(card, result, { prompts = {}, draftInstruction
   for (const field of SCORABLE_FIELDS) {
     const text = card.fields[field] || '';
     if (!text.trim()) continue;
-    if (field === 'character_note' && !supportsLorebook(card)) continue;
+    if (field === 'character_note' && !isV2(card)) continue;
     editable.push(field);
     const critique = critiqueFor(result, field);
-    parts.push(`### ${field} (~${estimateTokens(text)} tokens)`);
+    parts.push(`### ${field}`);
     if (critique) parts.push(`Rating of this field: ${critique}`);
     parts.push(text.trim(), '');
   }
   if (!editable.length) throw new Error('Card has no non-empty fields to improve');
 
-  if (supportsLorebook(card)) {
-    const { lines, audit } = lorebookContext(card, { maxChars: 24000, perEntry: 1200, heading: '### Lorebook' });
-    if (lines.length) parts.push(...lines);
-    parts.push(audit.count
-      ? 'This card has a lorebook: "move" ideas may create new entries, and "lorebook" ideas may change the entries above (field lorebook:N).'
-      : 'This card supports a lorebook but has none yet: "move" ideas may create entries.', '');
-  } else {
-    parts.push('This card is in the older V1 format, which has no lorebook: do not suggest "move" or "lorebook" ideas.', '');
-  }
-  parts.push(`Fields you may suggest changes to: ${editable.join(', ')}${supportsLorebook(card) && lorebookEntries(card).length ? ', or lorebook:N' : ''}.`);
+  parts.push(`Fields you may suggest changes to: ${editable.join(', ')}.`);
   return { system: systemPrompt('ideas', prompts, draftInstructions), user: parts.join('\n'), editable };
 }
 
@@ -262,8 +240,8 @@ const clean = (v, max) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, m
 /**
  * Step 1 of improving a card: the canon and a menu of specific changes.
  * Nothing is changed. Everything is checked against the card: ideas for parts
- * that don't exist are dropped, lorebook ideas are dropped for cards without
- * a lorebook, and quotes the model got wrong are dropped — a quote that isn't
+ * that don't exist (or of a kind this step doesn't do) are dropped, and quotes
+ * the model got wrong are dropped — a quote that isn't
  * really in the card can neither be protected nor relied on.
  */
 export async function generateIdeas(card, result, provider, { prompts = {}, draftInstructions = null } = {}) {
@@ -279,7 +257,6 @@ export async function generateIdeas(card, result, provider, { prompts = {}, draf
   }
   if (!parsed || !Array.isArray(parsed.ideas)) throw unusableAnswerError('ideas', reply.finishReason);
 
-  const lorebookOk = supportsLorebook(card);
   const targets = editTargets(card);
   const allText = [...targets.values()].map((t) => t.text).join('\n');
   const realQuote = (q) => {
@@ -291,12 +268,12 @@ export async function generateIdeas(card, result, provider, { prompts = {}, draf
     .filter((i) => i && clean(i.change, 2000))
     .map((i) => {
       const field = String(i.field ?? '').trim();
-      let kind = IDEA_KINDS.includes(String(i.kind).toLowerCase()) ? String(i.kind).toLowerCase() : null;
-      if (!kind) kind = i.lorebook ? 'move' : 'extend'; // older custom prompts don't name a kind
-      if (LORE_RE.test(field) && !['fix', 'combine', 'lorebook', 'extend', 'trim'].includes(kind)) kind = 'lorebook';
+      const named = String(i.kind ?? '').toLowerCase();
+      // Older custom prompts don't name a kind; a lorebook idea is out of scope here.
+      const kind = IDEA_KINDS.includes(named) ? named : !named && !i.lorebook ? 'extend' : null;
       return { i, field, kind };
     })
-    .filter(({ field, kind }) => targets.has(field) && (lorebookOk || (kind !== 'move' && kind !== 'lorebook')))
+    .filter(({ field, kind }) => kind && targets.has(field))
     .map(({ i, field, kind }, n) => {
       const risk = clean(i.risk, 400);
       const quotes = (Array.isArray(i.quotes) ? i.quotes : []).map(realQuote).filter(Boolean).slice(0, 6);
@@ -311,7 +288,6 @@ export async function generateIdeas(card, result, provider, { prompts = {}, draf
         quotes,
         impact: IMPACTS.includes(String(i.impact).toLowerCase()) ? String(i.impact).toLowerCase() : 'medium',
         risk: !risk || /^none\.?$/i.test(risk) ? '' : risk,
-        lorebook: kind === 'move',
       };
     })
     .slice(0, 12);
@@ -341,7 +317,6 @@ export async function generateIdeas(card, result, provider, { prompts = {}, draf
     keep: canon.map((c) => c.fact),
     keepQuotes,
     ideas,
-    lorebookSupported: lorebookOk,
     targetLabels: Object.fromEntries([...targets.values()].map((t) => [t.target, t.label])),
     model: provider.model,
     provider: provider.name,
@@ -353,30 +328,20 @@ export async function generateIdeas(card, result, provider, { prompts = {}, draf
 // ---------------------------------------------------------------------------
 
 /**
- * Which parts of the card the chosen ideas may change. A lorebook idea about
- * a duplicate also reaches the other copies (they get merged or switched off),
- * and any entry an idea names explicitly.
+ * Which fields the chosen ideas may change: the field each idea is about, and
+ * for a fix, any other field holding a passage it quotes ("the greeting says
+ * 8 feet"). Never the description because of a fix elsewhere — it's the canon
+ * the other parts are corrected to match — unless an idea is about it.
  */
-function planTargets(card, plan, targets) {
+function planTargets(plan, targets) {
   const out = new Set();
-  const audit = auditLorebook(card);
   for (const idea of plan.ideas) {
     if (targets.has(idea.field)) out.add(idea.field);
-    const blob = `${idea.change || ''} ${idea.why || ''} ${(idea.quotes || []).join(' ')}`;
-    for (const m of blob.matchAll(/lorebook:(\d+)/g)) if (targets.has(`lorebook:${m[1]}`)) out.add(`lorebook:${m[1]}`);
-    const lm = LORE_RE.exec(idea.field);
-    if (lm) {
-      for (const f of audit.findings.filter((x) => x.kind === 'duplicate' && x.entries.includes(Number(lm[1])))) {
-        for (const i of f.entries) out.add(`lorebook:${i}`);
-      }
-    }
-    // A fix can name text in another field ("the greeting says 8 feet") by quoting it.
+    if (idea.kind !== 'fix') continue;
     for (const q of idea.quotes || []) {
-      for (const t of targets.values()) if (containsQuote(t.text, q) && idea.kind === 'fix') out.add(t.target);
+      for (const t of targets.values()) if (containsQuote(t.text, q)) out.add(t.target);
     }
   }
-  // The description is canon: a fix changes the place that disagrees with it,
-  // never the description itself, unless an idea is about the description.
   if (!plan.ideas.some((i) => i.field === 'description')) out.delete('description');
   return out;
 }
@@ -388,7 +353,7 @@ export function buildImprovePrompts(card, result, { prompts = {}, draftInstructi
   let allowed;
 
   if (plan?.ideas?.length) {
-    allowed = planTargets(card, plan, targets);
+    allowed = planTargets(plan, targets);
     parts.push('Chosen changes — carry out exactly these, and change nothing else:');
     plan.ideas.forEach((idea, i) => {
       parts.push(`${i + 1}. [${idea.kind || 'change'} · ${idea.field}] ${idea.title} — ${idea.change}${idea.why ? ` (Why: ${idea.why})` : ''}`);
@@ -424,36 +389,14 @@ export function buildImprovePrompts(card, result, { prompts = {}, draftInstructi
   }
   for (const target of allowed) {
     const t = targets.get(target);
-    const critique = LORE_RE.test(target) ? null : critiqueFor(result, target);
-    const head = t.entry
-      ? `### ${target} — lorebook entry “${t.entry.title}” (keys: ${t.entry.keys.join(', ')})${t.entry.enabled ? '' : ' (switched off)'}`
-      : `### ${target} (~${estimateTokens(t.text)} tokens)`;
-    parts.push(head);
+    const critique = critiqueFor(result, target);
+    parts.push(`### ${target}`);
     if (critique) parts.push(`Critique of this field: ${critique}`);
     parts.push(t.text, '');
   }
-  parts.push(`You may edit only: ${[...allowed].join(', ')}.${plan?.ideas?.some((i) => i.kind === 'move') && supportsLorebook(card) ? ' Moves may also add new lorebook entries.' : ''}`);
+  parts.push(`You may edit only: ${[...allowed].join(', ')}.`);
 
   return { system: systemPrompt('improve', prompts, draftInstructions), user: parts.join('\n'), allowed, targets };
-}
-
-function cleanText(text) {
-  let out = String(text ?? '');
-  const fence = out.match(/^```[a-z]*\n([\s\S]*?)\n```\s*$/i);
-  if (fence) out = fence[1];
-  return out.replace(/\r\n/g, '\n').trim();
-}
-
-/** Normalises proposed lorebook entries; drops anything without keys and content. */
-function cleanLorebookEntries(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((e) => ({
-      keys: (Array.isArray(e?.keys) ? e.keys : [e?.keys]).map((k) => String(k ?? '').trim()).filter(Boolean).slice(0, 8),
-      content: cleanText(e?.content),
-    }))
-    .filter((e) => e.keys.length && e.content)
-    .slice(0, 12);
 }
 
 /**
@@ -504,10 +447,7 @@ been cut off). Respond again with ONLY the JSON object, with an "edits" list.`,
     };
   };
 
-  const wantsLorebook = Boolean(plan?.ideas?.some((i) => i.kind === 'move' || i.lorebook)) && supportsLorebook(card);
-  const lorebookEntriesOut = wantsLorebook ? cleanLorebookEntries(parsed.new_lorebook_entries) : [];
-
-  if (!placed.length && !lorebookEntriesOut.length) {
+  if (!placed.length) {
     const why = unplaced.length
       ? ` It suggested ${unplaced.length} change${unplaced.length === 1 ? '' : 's'}, but none could be placed (${[...new Set(unplaced.map((u) => u.reason))].join('; ')}).`
       : '';
@@ -520,13 +460,12 @@ been cut off). Respond again with ONLY the JSON object, with an "edits" list.`,
     unplaced: unplaced.map(describe),
     before: Object.fromEntries(touched.map((t) => [t, targets.get(t).text])),
     labels: Object.fromEntries(touched.map((t) => [t, targets.get(t).label])),
-    // The rest of the card (switched-off entries aside), so the dashboard can
-    // tell a detail that moved elsewhere from one that is gone.
+    // The rest of the card, so the dashboard can tell a detail that moved
+    // elsewhere from one that is gone.
     rest: [...targets.values()]
-      .filter((t) => !touched.includes(t.target) && (!t.entry || t.entry.enabled))
+      .filter((t) => !touched.includes(t.target))
       .map((t) => t.text)
       .join('\n'),
-    lorebookEntries: lorebookEntriesOut,
     headline: String(parsed.headline || '').trim(),
     model: provider.model,
     provider: provider.name,

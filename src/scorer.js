@@ -1,7 +1,6 @@
-import { SCORABLE_FIELDS, estimateTokens } from './cardParser.js';
+import { SCORABLE_FIELDS } from './cardParser.js';
 import { DEFAULT_PROMPTS, systemPrompt, promptHash } from './prompts.js';
 import { extractJsonObject } from './jsonExtract.js';
-import { lorebookContext } from './lorebook.js';
 
 /**
  * One request, returning the answer and why it ended. Providers that can
@@ -57,11 +56,11 @@ export function systemPromptFor(detail, prompts = {}, draftInstructions = null) 
 export function buildScoringPrompts(card, weights = DEFAULT_WEIGHTS, { detail = 'full', prompts = {}, draftInstructions = null } = {}) {
   return {
     system: systemPromptFor(detail, prompts, draftInstructions),
-    user: buildUserPrompt(card, weights, { skipZeroWeight: detail === 'fast', withLorebook: detail !== 'fast' }),
+    user: buildUserPrompt(card, weights, { skipZeroWeight: detail === 'fast' }),
   };
 }
 
-function buildUserPrompt(card, weights, { skipZeroWeight = false, withLorebook = false } = {}) {
+function buildUserPrompt(card, weights, { skipZeroWeight = false } = {}) {
   const parts = [`Character name: ${card.name}`, ''];
   for (const field of SCORABLE_FIELDS) {
     const text = card.fields[field];
@@ -71,24 +70,12 @@ function buildUserPrompt(card, weights, { skipZeroWeight = false, withLorebook =
     // but in a scores-only pass it is pure cost — and on cards with several
     // greetings it is often the largest field in the prompt.
     if (skipZeroWeight && (weights[field] ?? 0) === 0) continue;
-    const tokens = estimateTokens(text);
+    // No token counts: the card is judged on quality, and a size label next to
+    // each field invites the model to judge by length instead.
     const weight = weights[field] ?? 0;
-    parts.push(`### ${field} (~${tokens} tokens, weight ${weight})`);
+    parts.push(`### ${field} (weight ${weight})`);
     parts.push(text.trim());
     parts.push('');
-  }
-  // The full critique also sees the lorebook — not to score it, but because
-  // entries the model sees every turn are part of the character as played,
-  // and an entry describing an older look or a different height is exactly
-  // the kind of contradiction a critique should catch. Fast mode skips it:
-  // it's a scores-only pass and the lorebook can be large.
-  if (withLorebook && parts.some((p) => p.startsWith('### '))) {
-    const { lines } = lorebookContext(card, {
-      maxChars: 8000,
-      perEntry: 700,
-      heading: '### Lorebook — context for checking consistency. Not a field: do not score it or list it in "fields".',
-    });
-    if (lines.length) parts.push(...lines);
   }
   return parts.join('\n');
 }
@@ -112,7 +99,7 @@ function recomputeOverall(fields, weights) {
  */
 export async function scoreCard(card, provider, { weights = DEFAULT_WEIGHTS, detail = 'full', prompts = {}, draftInstructions = null } = {}) {
   const fast = detail === 'fast';
-  let user = buildUserPrompt(card, weights, { skipZeroWeight: fast, withLorebook: !fast });
+  let user = buildUserPrompt(card, weights, { skipZeroWeight: fast });
   // A card whose only text is in zero-weight fields still deserves a score;
   // fall back to scoring everything rather than refusing it.
   if (fast && !user.includes('###')) user = buildUserPrompt(card, weights);
@@ -162,8 +149,8 @@ export function parseScoreResponse(raw, weights = DEFAULT_WEIGHTS) {
 
   // Normalize/clamp scores defensively; models occasionally drift from the schema.
   const fields = {};
-  // Only real card fields: the full critique is shown the lorebook as context,
-  // and a model that scores it anyway shouldn't add a phantom field.
+  // Only real card fields: a model that invents an extra one (a "lorebook" or
+  // "overall" entry) shouldn't add a phantom field to the card's scores.
   const known = Object.keys(parsed.fields).some((n) => SCORABLE_FIELDS.includes(n));
   for (const [name, f] of Object.entries(parsed.fields)) {
     if (f == null) continue;

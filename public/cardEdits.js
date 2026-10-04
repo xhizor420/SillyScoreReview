@@ -3,12 +3,11 @@
  * checking what each one would take out of the card.
  *
  * Every suggested change is an anchored edit — "replace this exact passage",
- * "insert after this exact passage", "switch this lorebook entry off" — so
- * text outside an edit can't change. What an edit *can* do is remove a
+ * "insert after this exact passage" — so text outside an edit can't change. What an edit *can* do is remove a
  * detail, and that is measured here, live, against the whole card as it would
  * be saved: a detail counts as lost only if it's gone from everywhere, so
- * merging two passages (the detail moves) or a lorebook move (the detail is
- * in the new entry) is not flagged, but trimming the outfit description is.
+ * merging two passages (the detail moves) is not flagged, but trimming the
+ * outfit description is.
  *
  * Plain script (no build step): the dashboard loads it with <script>, and the
  * self-tests run it in a sandbox. Everything hangs off globalThis.CardEdits.
@@ -17,7 +16,7 @@
   /** The text of one part of the card with the given edits applied. */
   function compose(before, edits) {
     const used = edits
-      .filter((e) => e.use && e.action !== 'disable')
+      .filter((e) => e.use)
       .sort((a, b) => a.start - b.start || (a.order ?? 0) - (b.order ?? 0));
     let out = '';
     let pos = 0;
@@ -34,7 +33,7 @@
    */
   function spans(before, edits) {
     const used = edits
-      .filter((e) => e.use && e.action !== 'disable')
+      .filter((e) => e.use)
       .sort((a, b) => a.start - b.start || (a.order ?? 0) - (b.order ?? 0));
     const oldSide = [];
     const newSide = [];
@@ -98,12 +97,10 @@
     return [...detailTerms(removedText)].filter((t) => !have.has(t));
   }
 
-  // Changes whose point is to replace a detail: a fix ("8 feet" becomes "7
-  // feet") or an update to an outdated lorebook entry. What they remove is a
-  // correction, not a loss — and the same outdated words disappearing from a
-  // duplicate entry is the same correction.
-  const CORRECTING = new Set(['fix', 'lorebook']);
-  const corrects = (e) => e.action === 'replace' && CORRECTING.has(e.kind);
+  // A fix replaces a detail on purpose ("8 feet" becomes "7 feet"). What it
+  // removes is a correction, not a loss — and the same outdated words
+  // disappearing elsewhere is the same correction.
+  const corrects = (e) => e.action === 'replace' && e.kind === 'fix';
 
   function correctedTerms(parts) {
     const out = new Set();
@@ -126,7 +123,7 @@
     const card = wholeCard(parts, extraText);
     const corrected = correctedTerms(parts);
     e.use = was;
-    const gone = lostDetails(e.action === 'disable' ? p.before : e.old, card);
+    const gone = lostDetails(e.old, card);
     if (corrects(e)) return { lost: [], corrected: gone };
     return { lost: gone.filter((t) => !corrected.has(t)), corrected: [] };
   }
@@ -147,14 +144,12 @@
   }
 
   /**
-   * All the card's text as it would be saved: each edited part with its
-   * allowed edits (or your hand edit), minus lorebook entries being switched
-   * off, plus `extraText` (the untouched rest of the card and any new
-   * lorebook entries).
+   * All the card's text as it would be saved: each edited field with its
+   * allowed edits (or your hand edit), plus `extraText` (the untouched rest
+   * of the card).
    */
   function wholeCard(parts, extraText = '') {
     return parts
-      .filter((p) => !p.edits.some((e) => e.use && e.action === 'disable'))
       .map((p) => (p.handEdited ? p.after : compose(p.before, p.edits)))
       .concat(extraText)
       .join('\n');

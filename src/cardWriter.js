@@ -76,76 +76,6 @@ function splitGreetings(text) {
   return text.split(/\n*---\n*/).map((s) => s.trim()).filter(Boolean);
 }
 
-/**
- * Merges edited field text back into the card's own raw JSON.
- *
- * Only the fields actually given are touched, and everything else in the object
- * is passed through untouched — a card's lorebook (`character_book`),
- * `creator_notes`, `extensions`, `avatar`, custom keys from whatever tool made
- * it, all of it survives. Rewriting a card must never be a way to silently lose
- * data the tool doesn't happen to model.
- */
-/**
- * Appends lorebook entries to a V2/V3 card's character_book, creating the book
- * if the card has none. Follows the Character Card V2 spec: every entry has
- * keys, content, extensions ({}), enabled and insertion_order, and the book
- * itself has entries and extensions. Existing entries — and any keys this tool
- * doesn't know about — are never touched; the spec forbids destroying them.
- */
-function appendLorebookEntries(data, entries) {
-  if (!entries?.length) return;
-  const book = data.character_book && typeof data.character_book === 'object' ? data.character_book : {};
-  if (!Array.isArray(book.entries)) book.entries = [];
-  if (!book.extensions || typeof book.extensions !== 'object') book.extensions = {};
-  let order = book.entries.reduce((m, e) => Math.max(m, Number(e?.insertion_order) || 0), 0);
-  let id = book.entries.reduce((m, e) => Math.max(m, Number(e?.id) || 0), 0);
-  for (const e of entries) {
-    book.entries.push({
-      id: ++id,
-      keys: e.keys,
-      secondary_keys: [],
-      content: e.content,
-      extensions: {},
-      enabled: true,
-      insertion_order: (order += 10),
-      case_sensitive: false,
-      selective: false,
-      constant: false,
-      name: e.keys[0],
-      // Not used in prompts (per the spec) — marks where the entry came from.
-      comment: 'Moved here from the card by SillyScoreReview',
-    });
-  }
-  data.character_book = book;
-}
-
-/**
- * Changes to existing lorebook entries: new text, new keys, or switched off.
- * Entries are never deleted — an entry you retire is disabled, so it can be
- * switched back on in SillyTavern. Each update names the entry by index and
- * carries the start of the text it expects there; if the card changed in the
- * meantime, the save is refused rather than editing the wrong entry.
- */
-function updateLorebookEntries(data, updates) {
-  if (!updates?.length) return;
-  const entries = data.character_book?.entries;
-  if (!Array.isArray(entries)) throw new Error('This card has no lorebook to update.');
-  for (const u of updates) {
-    const entry = entries[u.index];
-    if (!entry || typeof entry !== 'object') throw new Error(`Lorebook entry ${u.index} no longer exists in this card.`);
-    if (u.expect != null && !String(entry.content ?? '').startsWith(String(u.expect))) {
-      throw new Error(`Lorebook entry ${u.index} has changed since it was reviewed — reopen the card and try again.`);
-    }
-    if (u.content != null) entry.content = String(u.content);
-    if (Array.isArray(u.keys)) entry.keys = u.keys.map((k) => String(k).trim()).filter(Boolean);
-    if (u.enabled === false) {
-      entry.enabled = false;
-      // SillyTavern's own world-info format uses "disable"; keep the two in step.
-      if ('disable' in entry) entry.disable = true;
-    }
-  }
-}
-
 /** Writes the Character's Note (extensions.depth_prompt.prompt), keeping its depth and role. */
 function setCharacterNote(data, text) {
   if (!data.extensions || typeof data.extensions !== 'object') data.extensions = {};
@@ -156,15 +86,19 @@ function setCharacterNote(data, text) {
   data.extensions.depth_prompt = dp;
 }
 
-export function applyFieldsToRaw(raw, { fields = {}, name, lorebookEntries = [], lorebookUpdates = [] } = {}) {
+/**
+ * Merges edited field text back into the card's own raw JSON.
+ *
+ * Only the fields actually given are touched, and everything else in the object
+ * is passed through untouched — a card's lorebook (`character_book`),
+ * `creator_notes`, `extensions`, `avatar`, custom keys from whatever tool made
+ * it, all of it survives. Rewriting a card must never be a way to silently lose
+ * data the tool doesn't happen to model.
+ */
+export function applyFieldsToRaw(raw, { fields = {}, name } = {}) {
   const next = structuredClone(raw);
   const isV2 = next.data && typeof next.data === 'object';
   const target = isV2 ? next.data : next;
-  if (lorebookEntries.length || lorebookUpdates.length) {
-    if (!isV2) throw new Error('This card is in the older V1 format, which has no lorebook. Save it without the lorebook changes.');
-    updateLorebookEntries(next.data, lorebookUpdates);
-    appendLorebookEntries(next.data, lorebookEntries);
-  }
 
   for (const field of SCORABLE_FIELDS) {
     if (!(field in fields)) continue;
@@ -196,9 +130,6 @@ export function applyFieldsToRaw(raw, { fields = {}, name, lorebookEntries = [],
       } else if (typeof next[field] === 'string') {
         next[field] = next.data[field];
       }
-    }
-    if ((lorebookEntries.length || lorebookUpdates.length) && next.character_book && typeof next.character_book === 'object') {
-      next.character_book = structuredClone(next.data.character_book);
     }
   }
 
@@ -257,8 +188,8 @@ export function writeCardToJson(raw) {
  * Produces the bytes for an edited card, picking the right container from the
  * filename so a .json card stays JSON and a .png card stays a PNG.
  */
-export function serializeCard({ filename, originalBuffer, raw, fields, name, lorebookEntries, lorebookUpdates }) {
-  const merged = applyFieldsToRaw(raw, { fields, name, lorebookEntries, lorebookUpdates });
+export function serializeCard({ filename, originalBuffer, raw, fields, name }) {
+  const merged = applyFieldsToRaw(raw, { fields, name });
   const bytes = filename.toLowerCase().endsWith('.json')
     ? writeCardToJson(merged)
     : writeCardToPng(originalBuffer, merged);

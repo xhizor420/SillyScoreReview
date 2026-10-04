@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 import { parseCardFile, hashCard, totalCardTokens } from './cardParser.js';
 import { createProvider, listModels, resolveConcurrency, PROVIDER_PRESETS } from './llmClient.js';
 import { scoreCard, buildScoringPrompts, ask } from './scorer.js';
-import { auditLorebook } from './lorebook.js';
 import { improveCard, buildImprovePrompts, generateIdeas, buildIdeasPrompts } from './improver.js';
 import {
   PROMPT_KINDS, DEFAULT_PROMPTS, instructionsFor, systemPrompt, promptHash,
@@ -236,13 +235,7 @@ export async function startServer(config) {
       const store = await getStore(config.charactersDir);
       const entry = store.get(file);
       const { card } = await readCardOrThrow(file);
-      // The lorebook's health, measured in code: duplicates, entries that are
-      // effectively always on, mislabelled entries. Shown with the card.
-      const { entries, ...lorebook } = auditLorebook(card);
-      res.json({
-        id: file, name: card.name, fields: card.fields, tags: card.tags, entry: entry || null,
-        lorebook: { ...lorebook, titles: entries.map((e) => ({ index: e.index, title: e.title, enabled: e.enabled, tokens: e.tokens })) },
-      });
+      res.json({ id: file, name: card.name, fields: card.fields, tags: card.tags, entry: entry || null });
     } catch (err) {
       res.status(404).json({ error: err.message });
     }
@@ -360,28 +353,7 @@ export async function startServer(config) {
   app.post('/api/cards/:id/save', async (req, res) => {
     const file = req.params.id;
     const { fields = {}, name, mode = 'new', rescore = false } = req.body || {};
-    const lorebookEntries = Array.isArray(req.body?.lorebookEntries)
-      ? req.body.lorebookEntries
-          .map((e) => ({
-            keys: (Array.isArray(e?.keys) ? e.keys : String(e?.keys ?? '').split(','))
-              .map((k) => String(k).trim()).filter(Boolean),
-            content: String(e?.content ?? '').trim(),
-          }))
-          .filter((e) => e.keys.length && e.content)
-      : [];
-    // Changes to existing entries: new text, or switched off. Never deleted.
-    const lorebookUpdates = Array.isArray(req.body?.lorebookUpdates)
-      ? req.body.lorebookUpdates
-          .filter((u) => Number.isInteger(u?.index) && u.index >= 0)
-          .map((u) => ({
-            index: u.index,
-            ...(typeof u.content === 'string' ? { content: u.content } : {}),
-            ...(u.enabled === false ? { enabled: false } : {}),
-            ...(typeof u.expect === 'string' ? { expect: u.expect } : {}),
-          }))
-          .filter((u) => 'content' in u || 'enabled' in u)
-      : [];
-    if (!fields || typeof fields !== 'object' || (!Object.keys(fields).length && !lorebookEntries.length && !lorebookUpdates.length)) {
+    if (!fields || typeof fields !== 'object' || !Object.keys(fields).length) {
       return res.status(400).json({ error: 'No edited fields were sent' });
     }
     if (mode !== 'new' && mode !== 'replace') {
@@ -393,7 +365,7 @@ export async function startServer(config) {
       const { buf, card } = await readCardOrThrow(file);
       const previousScore = store.get(file)?.result?.overall_score ?? null;
 
-      const { bytes } = serializeCard({ filename: file, originalBuffer: buf, raw: card.raw, fields, name, lorebookEntries, lorebookUpdates });
+      const { bytes } = serializeCard({ filename: file, originalBuffer: buf, raw: card.raw, fields, name });
 
       let targetFile = file;
       let backedUpAs = null;

@@ -332,15 +332,15 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
  */
 function parsePromptParts(user) {
   const out = {};
-  const parts = user.split(/^### ([\w:]+)([^\n]*)$/m);
+  const parts = user.split(/^### (\w+)([^\n]*)$/m);
   for (let i = 1; i < parts.length; i += 3) {
     const name = parts[i];
-    if (/^Lorebook$/i.test(name) || /REFERENCE ONLY/.test(parts[i + 1] || '')) continue;
+    if (/REFERENCE ONLY/.test(parts[i + 1] || '')) continue;
     const body = (parts[i + 2] || '')
       .split('\n')
       .filter((line) => !/^(Critique|Rating) of this field:/.test(line))
       .join('\n');
-    const cut = body.search(/\n(You may edit only:|Fields you may suggest|This card )/);
+    const cut = body.search(/\n(You may edit only:|Fields you may suggest)/);
     out[name] = (cut === -1 ? body : body.slice(0, cut)).trim();
   }
   return out;
@@ -362,7 +362,7 @@ function createMockProvider() {
       // path exercises the same parser a real fast scan does.
       if (/Output nothing else — no strengths/.test(system || '')) {
         const fields = {};
-        for (const m of user.matchAll(/### (\w+)/g)) if (m[1] !== 'Lorebook') fields[m[1]] = 6;
+        for (const m of user.matchAll(/### (\w+)/g)) fields[m[1]] = 6;
         const scores = Object.values(fields);
         return JSON.stringify({
           fields,
@@ -376,11 +376,10 @@ function createMockProvider() {
       // offline path exercises the same choose-then-edit flow.
       if (/"canon": \[/.test(system || '') && /"ideas": \[/.test(system || '')) {
         const originals = parsePromptParts(user);
-        const lorebookOk = /This card has a lorebook|has none yet: "move"/.test(user);
         const ideas = [];
         const canon = [];
         for (const [field, text] of Object.entries(originals)) {
-          if (!text || field.startsWith('lorebook:')) continue;
+          if (!text) continue;
           const quote = firstSentence(text);
           if (canon.length < 4 && quote) canon.push({ aspect: field === 'first_mes' ? 'voice' : 'personality', fact: `Mock provider: how ${field.replace(/_/g, ' ')} opens`, quote });
           ideas.push({
@@ -388,12 +387,6 @@ function createMockProvider() {
             change: `Add one concrete behaviour after the first sentence of ${field}.`, why: 'Mock provider: no real analysis.',
             quotes: quote ? [quote] : [], impact: ideas.length ? 'medium' : 'high', risk: 'none',
           });
-          if (lorebookOk && field === 'description' && text.split(/\s+/).length > 40) {
-            ideas.push({
-              kind: 'move', field, title: 'Move background into the lorebook', change: 'Move the last sentence of the description into a lorebook entry.',
-              why: 'Mock provider: long always-on background.', quotes: [], impact: 'medium', risk: 'Background only appears when its keyword comes up.',
-            });
-          }
         }
         return JSON.stringify({ canon, ideas });
       }
@@ -402,19 +395,9 @@ function createMockProvider() {
         const originals = parsePromptParts(user);
         const chosen = [...user.matchAll(/^(\d+)\. \[(\w+) · ([\w:]+)\]/gm)].map((m) => ({ n: Number(m[1]), kind: m[2], field: m[3] }));
         const edits = [];
-        const entries = [];
         for (const c of chosen.length ? chosen : Object.keys(originals).map((field, i) => ({ n: i + 1, kind: 'extend', field }))) {
           const text = originals[c.field];
           if (!text) continue;
-          if (c.kind === 'move') {
-            const sentences = text.match(/[^.!?]+[.!?]+(\s|$)/g) || [];
-            const last = (sentences[sentences.length - 1] || '').trim();
-            if (last && sentences.length > 1) {
-              edits.push({ idea: c.n, field: c.field, action: 'replace', find: last, text: '', why: 'Mock provider: moved to the lorebook.' });
-              entries.push({ keys: [last.split(/\s+/).find((w) => w.length > 4) || 'background'], content: last });
-            }
-            continue;
-          }
           const anchor = firstSentence(text);
           if (!anchor) continue;
           edits.push({
@@ -422,13 +405,13 @@ function createMockProvider() {
             text: ' {{char}} pauses, choosing the next words with care.', why: 'Mock provider: a placeholder behaviour.',
           });
         }
-        return JSON.stringify({ edits, new_lorebook_entries: entries, headline: 'Mock provider edits — use a real provider for actual improvements.' });
+        return JSON.stringify({ edits, headline: 'Mock provider edits — use a real provider for actual improvements.' });
       }
 
       // crude heuristic: score inversely correlated with filler/repetition, just for pipeline testing
       const lengthPenalty = Math.min(3, Math.max(0, (user.length - 3000) / 4000));
       const base = 7 - lengthPenalty;
-      const fieldsMatch = [...user.matchAll(/### (\w+)/g)].map((m) => m[1]).filter((f) => f !== 'Lorebook');
+      const fieldsMatch = [...user.matchAll(/### (\w+)/g)].map((m) => m[1]);
       const fields = {};
       for (const f of fieldsMatch) {
         const score = Math.max(1, Math.min(10, Math.round(base + (Math.random() * 2 - 1))));

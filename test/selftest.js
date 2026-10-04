@@ -436,7 +436,7 @@ async function main() {
   await testEditablePrompts();
   await testIdeasThenRewrite();
   await testChangePicker();
-  await testWriterLorebookAndNote();
+  await testWriterNoteAndFlatCopy();
   await testCardEditsReview();
   await testTwoPassAndRawReplies();
 
@@ -879,15 +879,15 @@ async function testImproverGuards() {
     { idea: 1, field: 'description', action: 'replace', find: 'She is quiet. She wears', text: 'x' },          // overlaps the first
     { idea: 1, field: 'description', action: 'replace', find: 'Nowhere in the card.', text: 'x' },             // missing
     { idea: 1, field: 'first_mes', action: 'replace', find: 'She is quiet.', text: 'She is quiet.' },           // no-op
-    { idea: 1, field: 'personality', action: 'disable' },                                                       // not a lorebook entry
-    { idea: 1, field: 'lorebook:0', action: 'disable' },                                                        // doesn't exist
+    { idea: 1, field: 'personality', action: 'disable' },                                                       // card text only
+    { idea: 1, field: 'lorebook:0', action: 'replace', find: 'x', text: 'y' },                                  // the lorebook isn't edited here
   ]);
   assert.equal(placed.length, 2);
   assert.deepEqual(unplaced.map((u) => u.reason), [
     'it overlaps another change to the same passage',
     'the quoted passage is not in the card',
     'it would change nothing',
-    'only lorebook entries can be switched off',
+    'it tries to switch something off — only card text is edited here',
     'it points at a part of the card that does not exist',
   ]);
   const after = applyEdits(d, placed);
@@ -1467,9 +1467,7 @@ async function testIdeasThenRewrite() {
       mes_example: '', system_prompt: 'Always stay in character.', post_history_instructions: '', alternate_greetings: [],
       creator_notes: 'Made by Anon. Use with a fantasy preset.',
       character_book: { entries: [
-        { id: 1, keys: ['lamp'], content: 'The lamp never goes out.', extensions: { mine: true }, enabled: true, insertion_order: 5 },
-        { id: 2, keys: ['Wren', 'appearance'], comment: 'Wren Appearance', content: OLD_LOOK, extensions: {}, enabled: true, insertion_order: 6 },
-        { id: 3, keys: ['Wren', 'look'], comment: 'Wren Appearance', content: `${OLD_LOOK} She smells of salt.`, extensions: {}, enabled: true, insertion_order: 7 },
+        { id: 1, keys: ['Wren', 'appearance'], comment: 'Wren Appearance', content: OLD_LOOK, extensions: {}, enabled: true, insertion_order: 6 },
       ], extensions: {} },
       extensions: { depth_prompt: { depth: 4, prompt: 'Write in third person. Keep replies under 300 words.', role: 'system' } },
     },
@@ -1492,8 +1490,9 @@ async function testIdeasThenRewrite() {
         ],
         ideas: [
           { kind: 'fix', field: 'first_mes', title: 'Greeting height matches', change: 'Change "all eight feet of her" to match 180 cm.', why: 'Contradiction.', quotes: ['all eight feet of her', 'She is 180 cm tall', 'not really in the card'], impact: 'HIGH', risk: 'none' },
-          { kind: 'lorebook', field: 'lorebook:1', title: 'Merge the two appearance entries', change: 'Keep lorebook:1 updated to the canon look, merge what is unique from lorebook:2, switch lorebook:2 off.', why: 'Duplicates with an old look.', quotes: [], impact: 'high', risk: 'none' },
-          { kind: 'move', field: 'description', title: 'Move harbour lore out', change: 'Move the wreck history to the lorebook.', why: 'Repeats.', quotes: [], impact: 'medium', risk: 'none' },
+          { kind: 'combine', field: 'description', title: 'One line for the harbour', change: 'Merge the repeated harbour history.', why: 'Said eight times.', quotes: [], impact: 'high', risk: 'none' },
+          { kind: 'lorebook', field: 'lorebook:0', title: 'Merge appearance entries', change: 'x', impact: 'high' },
+          { kind: 'move', field: 'description', title: 'Move harbour lore out', change: 'Move the wreck history to the lorebook.', impact: 'medium' },
           { field: 'not_a_field', title: 'Bogus', change: 'x', impact: 'low' },
         ],
       });
@@ -1501,21 +1500,21 @@ async function testIdeasThenRewrite() {
   };
   const ideas = await generateIdeas(parsed, null, ideasProvider);
   assert.ok(!seenIdeasPrompt.includes('Made by Anon'), 'creator notes are not the card and must not be sent');
-  assert.ok(seenIdeasPrompt.includes('[lorebook:1] “Wren Appearance”') && seenIdeasPrompt.includes(OLD_LOOK),
-    'the model sees each lorebook entry, by number, with its text');
-  assert.match(seenIdeasPrompt, /say much the same thing/, 'and the measured lorebook checks');
-  assert.ok(seenIdeasPrompt.includes('### character_note'), "and the Character's Note");
-  assert.deepEqual(ideas.ideas.map((i) => i.kind), ['fix', 'lorebook', 'move'], 'unknown parts of the card are dropped');
+  assert.ok(!seenIdeasPrompt.includes(OLD_LOOK) && !/lorebook/i.test(seenIdeasPrompt), 'card only: the lorebook is not sent');
+  assert.ok(seenIdeasPrompt.includes('### character_note'), "the Character's Note is part of the card");
+  assert.doesNotMatch(seenIdeasPrompt, /tokens/, 'no token counts — quality, not size');
+  assert.deepEqual(ideas.ideas.map((i) => i.kind), ['fix', 'combine'], 'lorebook and move ideas, and unknown fields, are dropped');
   assert.equal(ideas.ideas[0].impact, 'high');
   assert.deepEqual(ideas.ideas[0].quotes, ['all eight feet of her', 'She is 180 cm tall'], 'quotes not really in the card are dropped');
   assert.deepEqual(ideas.canon.map((c) => [c.aspect, c.quote]), [
     ['look', 'She is 180 cm tall'], ['voice', 'Storm\'s coming, {{user}}.'], ['look', ''], ['other', ''],
   ], 'a canon fact keeps its quote only if the quote is really in the card');
   assert.deepEqual(ideas.keepQuotes, ['She is 180 cm tall', 'Storm\'s coming, {{user}}.']);
-  console.log('✓ ideas come with kinds and quotes checked against the card; the canon keeps only real quotes; lorebook and note are seen, creator notes are not');
+  console.log('✓ ideas are card only, with kinds and quotes checked against the card; the canon keeps only real quotes; creator notes and lorebook are not sent');
 
   // Creator notes are the creator's profile blurb, credits and links — not the
   // character. No prompt may include them: not scoring, not either improve step.
+  // And the review is card only: the lorebook isn't sent anywhere either.
   const { buildScoringPrompts } = await import('../src/scorer.js');
   const { buildIdeasPrompts, buildImprovePrompts } = await import('../src/improver.js');
   const everyPrompt = [
@@ -1526,20 +1525,15 @@ async function testIdeasThenRewrite() {
   ];
   assert.ok(everyPrompt.every((p) => !(p.system + p.user).includes('Made by Anon')),
     'creator notes must never reach the model, for scoring or improving');
-  console.log('✓ creator notes are never sent — not for full or fast scoring, not for ideas, not for the edits');
-  assert.ok(everyPrompt[0].user.includes(OLD_LOOK) && everyPrompt[0].user.includes('Not a field'),
-    'the full critique sees the lorebook as context, to catch contradictions');
-  assert.ok(!everyPrompt[1].user.includes(OLD_LOOK), 'fast scoring stays lean: no lorebook');
-  console.log('✓ the full critique sees the lorebook as context (to catch an outdated look); fast scoring does not');
+  assert.ok(everyPrompt.every((p) => !(p.system + p.user).includes(OLD_LOOK) && !/lorebook/i.test(p.system + p.user)),
+    'the lorebook is not part of any review or improve prompt');
+  assert.ok(everyPrompt.every((p) => !/~\d+ tokens/.test(p.user)), 'no token counts next to fields');
+  assert.match(everyPrompt[0].system, /THE BAR IS 10\/10/);
+  console.log('✓ every prompt is the card only — no creator notes, no lorebook, no token counts — and the critique scores against a 10/10 bar');
 
   const v1 = extractCardFromPng(buildFakePng({ name: 'Flat', description: 'x '.repeat(80), first_mes: 'hi' }));
-  const v1ideas = await generateIdeas(v1, null, { name: 's', model: 's', async chat() {
-    return JSON.stringify({ canon: [], ideas: [
-      { kind: 'move', field: 'description', title: 't', change: 'move it', impact: 'high' },
-      { kind: 'extend', field: 'first_mes', title: 'u', change: 'add a hook', impact: 'high' },
-    ] });
-  } });
-  assert.deepEqual(v1ideas.ideas.map((i) => i.kind), ['extend'], 'a V1 card has no lorebook, so move ideas are dropped');
+  const v1prompt = buildIdeasPrompts(v1, null);
+  assert.ok(!v1prompt.user.includes('### character_note'), 'a V1 card has no Character\'s Note to edit');
 
   // --- edits: only what the chosen ideas are about ---
   let seenEditPrompt = '';
@@ -1550,61 +1544,51 @@ async function testIdeasThenRewrite() {
       return JSON.stringify({
         edits: [
           { idea: 1, field: 'first_mes', action: 'replace', find: 'all eight feet of her', text: 'all 180 cm of her', why: 'Match the canon height.' },
-          { idea: 2, field: 'lorebook:1', action: 'replace', find: OLD_LOOK, text: 'Wren is 180 cm tall and wears a grey oilskin coat. She smells of salt.', why: 'Canon look; merged the unique detail.' },
-          { idea: 2, field: 'lorebook:2', action: 'disable', find: '', text: '', why: 'Duplicate.' },
           { idea: 1, field: 'description', action: 'replace', find: 'She is 180 cm tall', text: 'She is 8 feet tall', why: 'Nobody asked.' },
           { idea: 1, field: 'personality', action: 'replace', find: 'Dry, watchful.', text: 'TOTALLY DIFFERENT', why: 'Nobody asked.' },
+          { idea: 1, field: 'lorebook:0', action: 'disable', find: '', text: '', why: 'Not here.' },
         ],
         new_lorebook_entries: [{ keys: ['harbour'], content: 'Unasked-for entry.' }],
-        headline: 'Fixed the height and merged the appearance entries.',
+        headline: 'Fixed the height.',
       });
     },
   };
   const canon = ideas.canon.filter((c) => c.quote);
-  const plan = { ideas: ideas.ideas.slice(0, 2), canon, keepQuotes: ideas.keepQuotes };
+  const plan = { ideas: ideas.ideas.slice(0, 1), canon, keepQuotes: ideas.keepQuotes };
   const proposal = await improveCard(parsed, null, editProvider, { plan });
-  assert.ok(seenEditPrompt.includes('### first_mes') && seenEditPrompt.includes('### lorebook:1') && seenEditPrompt.includes('### lorebook:2'),
-    'the parts the ideas are about are sent — a lorebook duplicate reaches its other copy');
+  assert.ok(seenEditPrompt.includes('### first_mes'), 'the field the fix is about is sent');
   assert.ok(seenEditPrompt.includes('### description (REFERENCE ONLY'), 'the description is the reference, not an edit target');
-  assert.ok(!seenEditPrompt.includes('### personality'), 'parts nobody chose a change for are not sent');
+  assert.ok(!seenEditPrompt.includes('### personality'), 'fields nobody chose a change for are not sent');
   assert.match(seenEditPrompt, /Canon — what makes this character itself[\s\S]*look: 180 cm tall \(“She is 180 cm tall”\)/);
-  assert.deepEqual(proposal.edits.map((e) => `${e.action}@${e.target}`), ['replace@first_mes', 'replace@lorebook:1', 'disable@lorebook:2']);
-  assert.deepEqual(proposal.unplaced.map((u) => u.target), ['description', 'personality'], 'edits outside the chosen ideas are refused');
-  assert.equal(proposal.edits[2].kind, 'lorebook');
-  assert.equal(proposal.lorebookEntries.length, 0, 'new entries are only accepted when a chosen idea is a move');
-  assert.ok(proposal.rest.includes('Dry, watchful.'), 'the rest of the card comes back for the "is this detail still anywhere" check');
-  console.log('✓ the edits stay inside the chosen ideas: a fix in the greeting, a merged lorebook entry and its duplicate switched off — nothing else');
+  assert.deepEqual(proposal.edits.map((e) => `${e.action}@${e.target}`), ['replace@first_mes']);
+  assert.deepEqual(proposal.unplaced.map((u) => u.target), ['description', 'personality', 'lorebook:0'], 'edits outside the chosen ideas, or outside the card, are refused');
+  assert.equal(proposal.lorebookEntries, undefined, 'no lorebook entries come back');
+  assert.ok(proposal.rest.includes('Dry, watchful.') && !proposal.rest.includes(OLD_LOOK), 'the rest of the card (card only) comes back for the detail check');
+  console.log('✓ the edits stay inside the chosen ideas and the card: the greeting fix goes through; the description, an unchosen field and the lorebook are refused');
 }
 
-/** Saving edits: the Character's Note, lorebook updates, and the flat copy SillyTavern exports. */
-async function testWriterLorebookAndNote() {
+/** Saving edits: the Character's Note, and the flat copy SillyTavern's JSON exports carry. */
+async function testWriterNoteAndFlatCopy() {
   const { applyFieldsToRaw } = await import('../src/cardWriter.js');
   const raw = {
-    name: 'Wren', description: 'old', first_mes: 'hi', character_book: { entries: [{ content: 'A' }, { content: 'B', disable: false }] },
+    name: 'Wren', description: 'old', first_mes: 'hi', character_book: { entries: [{ content: 'A' }] },
     spec: 'chara_card_v2', spec_version: '2.0',
     data: {
       name: 'Wren', description: 'old', first_mes: 'hi', alternate_greetings: [], extensions: { depth_prompt: { depth: 2, prompt: 'p', role: 'system' }, custom: 1 },
-      character_book: { entries: [{ id: 1, content: 'A', keys: ['a'], extensions: { keep: 1 } }, { id: 2, content: 'B', keys: ['b'], disable: false, enabled: true, extensions: {} }], extensions: {} },
+      character_book: { entries: [{ id: 1, content: 'A', keys: ['a'], extensions: { keep: 1 } }], extensions: {} },
     },
   };
-  const out = applyFieldsToRaw(raw, {
-    fields: { description: 'new', character_note: 'Write in third person.' },
-    lorebookUpdates: [{ index: 0, content: 'A, merged with B', expect: 'A' }, { index: 1, enabled: false, expect: 'B' }],
-  });
+  const out = applyFieldsToRaw(raw, { fields: { description: 'new', character_note: 'Write in third person.' } });
   assert.equal(out.data.description, 'new');
   assert.equal(out.description, 'new', 'the flat top-level copy SillyTavern exports is kept in step');
+  assert.equal(out.first_mes, 'hi');
   assert.deepEqual(out.data.extensions.depth_prompt, { depth: 2, prompt: 'Write in third person.', role: 'system' }, "the note's depth and role are kept");
   assert.equal(out.data.extensions.custom, 1);
-  assert.equal(out.data.character_book.entries[0].content, 'A, merged with B');
-  assert.deepEqual(out.data.character_book.entries[0].extensions, { keep: 1 }, 'everything else about an entry is kept');
-  assert.equal(out.data.character_book.entries[1].enabled, false);
-  assert.equal(out.data.character_book.entries[1].disable, true, "SillyTavern's own flag is kept in step");
-  assert.equal(out.data.character_book.entries.length, 2, 'entries are switched off, never deleted');
-  assert.equal(out.character_book.entries[0].content, 'A, merged with B', 'the top-level lorebook copy follows');
+  assert.deepEqual(out.data.character_book, raw.data.character_book, 'the lorebook is untouched');
+  assert.deepEqual(out.character_book, raw.character_book);
   assert.equal(raw.data.description, 'old', 'the original object is not mutated');
-  assert.throws(() => applyFieldsToRaw(raw, { lorebookUpdates: [{ index: 0, content: 'x', expect: 'Something else' }] }), /has changed since it was reviewed/);
   assert.throws(() => applyFieldsToRaw({ name: 'Flat', description: 'd' }, { fields: { character_note: 'x' } }), /V1 format/);
-  console.log("✓ saving writes the Character's Note, updates or switches off lorebook entries (never deletes), and keeps SillyTavern's flat copy in step");
+  console.log("✓ saving writes the Character's Note (keeping its depth and role), keeps SillyTavern's flat copy in step, and leaves the lorebook alone");
 }
 
 /**
@@ -1638,27 +1622,16 @@ async function testCardEditsReview() {
   const fix = { target: 'first_mes', before: greeting, handEdited: false, edits: [
     { start: 6, end: 23, old: 'all 8 feet of her', action: 'replace', new: 'all 180 cm of her', kind: 'fix', order: 0 },
   ] };
-  const dupA = { target: 'lorebook:1', before: 'Wren is tall and wears a grey coat.', handEdited: false, edits: [] };
-  const dupB = { target: 'lorebook:2', before: 'Wren is tall and wears a grey coat. She hums sea shanties.', handEdited: false, edits: [
-    { start: 0, end: 0, old: '', new: '', action: 'disable', kind: 'lorebook', order: 0 },
-  ] };
-  const parts = [part, fix, dupA, dupB];
+  const parts = [part, fix];
   C.defaultUses(parts, 'Wren is 180 cm tall.');
   assert.deepEqual(part.edits.map((e) => e.use), [false, true, true, true], 'only the outfit trim starts off');
   assert.equal(fix.edits[0].use, true, 'a fix starts on — changing that detail is its point');
-  assert.equal(dupB.edits[0].use, false, 'switching off a "duplicate" that holds a unique detail starts off');
   part.edits[0].use = true; // judged as if it were on, like the page does
   const lost = C.lostDetails(part.edits[0].old, C.wholeCard(parts, ''));
   part.edits[0].use = false;
   for (const t of ['oilskin', 'brass', 'buttons', 'red', 'wool', 'scarf']) assert.ok(lost.includes(t), `the check names what the trim would remove: ${t}`);
   assert.ok(!lost.includes('grey'), 'a detail still in the card is not reported lost');
   console.log(`✓ a change that would remove details starts off and names them (${lost.join(', ')}); merges, additions and fixes start on`);
-
-  // Merge the unique line into the kept entry, and the switch-off becomes safe.
-  dupA.edits.push({ start: dupA.before.length, end: dupA.before.length, old: '', new: ' She hums sea shanties.', action: 'insert_after', kind: 'lorebook', order: 0 });
-  C.defaultUses(parts, 'Wren is 180 cm tall.');
-  assert.equal(dupB.edits[0].use, true, 'once its unique detail is merged into the kept entry, switching the duplicate off loses nothing');
-  console.log('✓ a duplicate lorebook entry can be switched off safely once what was unique in it lives in the kept entry');
 
   part.edits[0].use = false;
   const final = C.compose(part.before, part.edits);

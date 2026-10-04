@@ -174,8 +174,8 @@ built-in prompt back. Edits are saved to `config.json` under `prompts`.
 ## Improving a card
 
 Scoring tells you a card is a 4/10 — or that a deep, much-loved card has a few things
-holding it back. **Improve with AI**, on the card itself, does something about it, built
-around one rule: **the character stays the character**. Its look, voice, goals and
+between it and a 10/10. **Improve with AI**, on the card itself, does something about it,
+built around one rule: **the character stays the character**. Its look, voice, goals and
 everything else that makes it itself are kept; what changes is what you choose, and only
 where you choose it.
 
@@ -184,14 +184,14 @@ where you choose it.
 writes the full critique first, saves it to the card, then goes on — so it is never spent
 twice, and the ideas are never guessed from the text alone.
 
-**2 · Choose ideas.** The model reads the card, its critique, its Character's Note and its
-lorebook, and comes back with:
+**2 · Choose ideas.** The model reads the card (including its Character's Note) and its
+critique, and comes back with what would take it to a 10/10:
 
 - **The canon — what makes this card itself**, grouped by *look, personality, voice,
   goals, relationships, powers, setting, format*. Each fact comes with a short quote from
   the card that establishes it (a quote the model got wrong is dropped — a line that isn't
   really in the card can't be protected). The **description is the reference**: where the
-  greeting or the lorebook disagrees with it, the description's version is canon. Untick
+  greeting or the examples disagree with it, the description's version is canon. Untick
   anything you're happy to see changed, and add anything else you want kept ("her outfit
   stays exactly as described"). The canon goes with every change as a hard rule, and its
   quoted lines are checked word for word in the review.
@@ -202,19 +202,17 @@ lorebook, and comes back with:
 | **Fix** | A contradiction or error — the greeting says 8 feet, the description says 7'0". The part that disagrees changes to match the canon. |
 | **Combine** | Details about one thing are scattered or said twice; they're merged into one stronger passage that keeps every detail from each. |
 | **Extend** | A thin spot where a little more helps the model play the character — a behaviour, a sensory detail, a reaction, a line in their voice. Built only on what the card already says: no new backstory, powers or plot. |
-| **Move** | Scene-specific detail moves from an always-sent field into a new **lorebook entry** (sent only when a keyword comes up). Nothing is lost. |
-| **Lorebook** | Fixes an existing entry: merges duplicates into one and **switches the others off** (never deletes), updates an entry that still describes an older version of the character, flags a mislabelled one. |
 | **Trim** | Only true repetition or reader-facing text (credits, links, update notes). **Never pre-ticked** — removing things is always your call. |
 
   Each idea shows the passages it's about, what it fixes, how much it matters, and —
-  plainly — how it could change the card's feel. Fixes, combines, extensions and lorebook
-  fixes with no such risk come pre-ticked.
+  plainly — how it could change the card's feel. Fixes, combines and extensions with no
+  such risk come pre-ticked.
 
 **3 · Review changes.** The ideas you tick come back as **precise edits to the card's own
 text — never a rewrite of whole fields.** Each edit quotes one exact passage ("replace
-this sentence with…", "add this after that line…", "switch this lorebook entry off"), so
+this sentence with…", "add this after that line…"), so
 **everything outside an edit stays word for word**. The model can't quietly summarise a
-3,000-token description and drop the outfit, because it never hands back the description
+long description and drop the outfit, because it never hands back the description
 — only the passages it's changing.
 
 - Each change is shown **in place**: *Card now* beside *With this change*, with the
@@ -224,16 +222,13 @@ this sentence with…", "add this after that line…", "switch this lorebook ent
   would be saved: *✓ Keeps every detail*, *✓ Adds only*, *Corrects: "8 feet"* (a fix, on
   purpose) — or *⚠ Would remove details found nowhere else in the card: "oilskin",
   "brass", "scarf"*. **A change that would lose a detail starts off**; everything else
-  starts on. A detail that merely moved — into a merged passage, or a new lorebook entry —
-  is still in the card, so it isn't flagged.
-- Switching off a duplicate lorebook entry is checked the same way: if it held something
-  the kept entry doesn't, you're told what, and it starts off.
+  starts on. A detail that merely moved — into a merged passage — is still in the card,
+  so it isn't flagged.
 - **Compare the whole field side by side** for the full picture, and **edit the final text
   by hand** if you want (the switches pause while you do, so they can't overwrite you).
 - A change whose quote isn't in the card (or is there twice) is **never guessed at** —
   it's listed as couldn't-be-placed, with its text, so you can copy it in by hand.
-- Also checked live: a protected canon line going missing, a lost `{{user}}`/`{{char}}`,
-  and lorebook moves whose two halves disagree.
+- Also checked live: a protected canon line going missing, and a lost `{{user}}`/`{{char}}`.
 
 Save it as a **new card file** — `Name (improved).png`, the default, with your original
 untouched and keeping its score — or **replace the original** (a copy of the pre-edit file
@@ -251,49 +246,36 @@ SillyTavern practice: `system_prompt` / `post_history_instructions` without `{{o
 message, hard-coded names where `{{char}}`/`{{user}}` was meant, and greetings that speak
 or act for `{{user}}`.
 
-### The review sees the whole card
+### Card only, judged against a 10/10
 
-- **Character's Note** (SillyTavern's `extensions.depth_prompt`) is read, scored and
-  editable like any field — it's often where a card sets its style, length and point of
-  view, and a review that can't see it misjudges the card. Its depth and role are kept
-  when it's saved.
-- **The lorebook** goes to the full critique as context (not scored): entries the model
-  sees every turn are part of the character as played, and an entry still describing an
-  older look is exactly the contradiction a critique should catch.
-- **Depth, not length.** The critique credits specific, usable detail however much there
-  is; the faults are repetition, filler, generic phrasing, traits told but never shown,
-  and contradictions between parts of the card. Its suggestions are written to keep the
-  character: fix, combine, extend — never cut a distinctive detail.
-
-### Lorebook health
-
-Opening a card shows a **Lorebook** section, measured in code (not the model's opinion):
-
-- **Near-duplicate entries** — lorebooks grown from chat memories collect three copies of
-  "Physical Appearance", each slightly different, and an old copy keeps telling the model
-  a look the card has since moved on from.
-- **Entries keyed on the character's own name** — her name comes up in almost every
-  message, so those entries are effectively always on. You see how many tokens that adds
-  to nearly every message.
-- **Very common keys** ("magic", "plan", "location") that fire far more often than the
-  entry is relevant.
-- **Mislabelled entries** — an entry titled "Rainbow Dash" whose keys and text are all
-  about Rarity.
-
-Improve with AI sees these findings and can propose the fixes.
+- **The card, the whole card, and nothing but the card.** Scoring and Improve look at the
+  card's own fields — including the **Character's Note** (SillyTavern's
+  `extensions.depth_prompt`), which is read, scored and editable like any field, since it's
+  often where a card sets its style, length and point of view (its depth and role are kept
+  when saved). The **lorebook is not part of the review or of Improve**: it works on
+  triggers, so entries naturally overlap the card a little, and judging the card by them
+  would be judging something else. It's left exactly as it is in every save.
+- **The bar is 10/10.** The critique scores each field against a card a skilled writer
+  would hold up as an example, and every suggestion is a step toward it.
+- **Depth, not length.** Specific, usable detail earns credit however much of it there is;
+  the faults are repetition, filler, generic phrasing, traits told but never shown, and
+  contradictions between parts of the card. No token counts are shown to the model, so
+  size can't sway it. Suggestions keep the character: fix, combine, extend — never cut a
+  distinctive detail.
 
 **Creator notes are never judged.** They're the creator's profile blurb, credits and
 links — not the character, and never part of a chat. They aren't sent for scoring (full
 or fast) or for either improve step, so they can't raise or lower a score or shape a
 suggestion.
 
-Everything else in the card — creator notes, tags, `extensions`, the artwork, every
-lorebook entry you didn't change — is copied through byte-for-byte, and the flat copy of
+Everything else in the card — creator notes, tags, `extensions`, the lorebook, the
+artwork — is copied through byte-for-byte, and the flat copy of
 the fields that SillyTavern's JSON exports carry at the top level is kept in step. Both
 steps' prompts are editable in **Prompts** (*Improvement ideas* and *Improve card*).
 
-**After updating:** the default prompts changed (depth not length, consistency across the
-card), so scores made with the old defaults show as **older prompt**. Nothing is rescored
+**After updating:** the default prompts changed (a 10/10 bar, depth not length,
+consistency across the card), so scores made with the old defaults show as **older
+prompt**. Nothing is rescored
 by itself — filter *Scored with an older prompt* and rescore what you want. If you pasted
 your own prompt into Prompts, yours is kept; press **Reset to default** on a tab to try the
 new one.
