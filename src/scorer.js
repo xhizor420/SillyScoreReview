@@ -56,11 +56,16 @@ export function systemPromptFor(detail, prompts = {}, draftInstructions = null) 
 export function buildScoringPrompts(card, weights = DEFAULT_WEIGHTS, { detail = 'full', prompts = {}, draftInstructions = null } = {}) {
   return {
     system: systemPromptFor(detail, prompts, draftInstructions),
-    user: buildUserPrompt(card, weights, { skipZeroWeight: detail === 'fast' }),
+    user: buildUserPrompt(card, weights, { skipZeroWeight: detail === 'fast', listEmpty: detail !== 'fast' }),
   };
 }
 
-function buildUserPrompt(card, weights, { skipZeroWeight = false } = {}) {
+// Empty fields worth naming to the critique: missing example dialogue,
+// alternate greetings or a Character's Note is often what separates a good
+// card from a top-tier one, and Improve can fill them.
+const WORTH_FILLING = ['scenario', 'first_mes', 'mes_example', 'alternate_greetings', 'character_note'];
+
+function buildUserPrompt(card, weights, { skipZeroWeight = false, listEmpty = false } = {}) {
   const parts = [`Character name: ${card.name}`, ''];
   for (const field of SCORABLE_FIELDS) {
     const text = card.fields[field];
@@ -76,6 +81,11 @@ function buildUserPrompt(card, weights, { skipZeroWeight = false } = {}) {
     parts.push(`### ${field} (weight ${weight})`);
     parts.push(text.trim());
     parts.push('');
+  }
+  if (listEmpty && parts.some((p) => p.startsWith('### '))) {
+    const v2 = Boolean(card.raw?.data && typeof card.raw.data === 'object');
+    const empty = WORTH_FILLING.filter((f) => !(card.fields[f] || '').trim() && (f !== 'character_note' || v2));
+    if (empty.length) parts.push(`Empty fields (not scored, but could be filled): ${empty.join(', ')}.`);
   }
   return parts.join('\n');
 }
@@ -99,7 +109,7 @@ function recomputeOverall(fields, weights) {
  */
 export async function scoreCard(card, provider, { weights = DEFAULT_WEIGHTS, detail = 'full', prompts = {}, draftInstructions = null } = {}) {
   const fast = detail === 'fast';
-  let user = buildUserPrompt(card, weights, { skipZeroWeight: fast });
+  let user = buildUserPrompt(card, weights, { skipZeroWeight: fast, listEmpty: !fast });
   // A card whose only text is in zero-weight fields still deserves a score;
   // fall back to scoring everything rather than refusing it.
   if (fast && !user.includes('###')) user = buildUserPrompt(card, weights);

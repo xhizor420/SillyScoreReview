@@ -915,6 +915,24 @@ async function testImproverGuards() {
   assert.equal(out.edits[0].kind, 'extend');
   console.log('✓ an edit outside the chosen ideas is refused; inserts get their spacing; each edit names its idea');
 
+  // Filling an empty field: the one edit with nothing to quote.
+  const fillTargets = editTargets(card);
+  assert.equal(fillTargets.get('mes_example').empty, true, 'empty fields worth filling are offered');
+  assert.ok(!fillTargets.has('system_prompt'), 'but not the system prompts (they replace the user\'s own)');
+  const fill = placeEdits(fillTargets, [
+    { idea: 1, field: 'mes_example', action: 'write', find: '', text: '<START>\n{{char}}: "Storm\'s coming."' },
+    { idea: 1, field: 'mes_example', action: 'write', find: '', text: 'again' },
+    { idea: 1, field: 'personality', action: 'write', find: '', text: 'new personality' },
+  ]);
+  assert.deepEqual(fill.placed.map((e) => [e.target, e.action, e.start, e.end]), [['mes_example', 'write', 0, 0]]);
+  assert.deepEqual(fill.unplaced.map((u) => u.reason), ['this field is already being filled', '"write" only fills an empty field — this one already has text']);
+  assert.equal(applyEdits('', fill.placed), '<START>\n{{char}}: "Storm\'s coming."');
+  const { buildIdeasPrompts: ideasFor } = await import('../src/improver.js');
+  assert.match(ideasFor(card, null).user, /Empty fields you may suggest filling \(kind "extend"\): scenario, mes_example, alternate_greetings\./);
+  const { buildScoringPrompts: scoringFor } = await import('../src/scorer.js');
+  assert.match(scoringFor(card, undefined, { detail: 'full' }).user, /Empty fields \(not scored, but could be filled\): scenario, mes_example, alternate_greetings\./);
+  console.log('✓ empty fields worth filling (examples, alternate greetings, scenario) can be written in one edit — only when really empty, once');
+
   const echoProvider = {
     name: 'echo', model: 'echo',
     async chat() { return JSON.stringify({ edits: [{ field: 'personality', action: 'replace', find: 'terse', text: 'terse' }], headline: 'nothing' }); },
@@ -1528,7 +1546,7 @@ async function testIdeasThenRewrite() {
   assert.ok(everyPrompt.every((p) => !(p.system + p.user).includes(OLD_LOOK) && !/lorebook/i.test(p.system + p.user)),
     'the lorebook is not part of any review or improve prompt');
   assert.ok(everyPrompt.every((p) => !/~\d+ tokens/.test(p.user)), 'no token counts next to fields');
-  assert.match(everyPrompt[0].system, /THE BAR IS 10\/10/);
+  assert.match(everyPrompt[0].system, /WHAT A 10\/10 CARD DOES/);
   console.log('✓ every prompt is the card only — no creator notes, no lorebook, no token counts — and the critique scores against a 10/10 bar');
 
   const v1 = extractCardFromPng(buildFakePng({ name: 'Flat', description: 'x '.repeat(80), first_mes: 'hi' }));

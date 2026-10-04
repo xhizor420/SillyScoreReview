@@ -204,13 +204,14 @@ critique, and comes back with what would take it to a 10/10:
   anything you're happy to see changed, and add anything else you want kept ("her outfit
   stays exactly as described"). The canon goes with every change as a hard rule, and its
   quoted lines are checked word for word in the review.
-- **A menu of specific changes, each of a stated kind:**
+- **A menu of specific changes, each of a stated kind** — found by going through the
+  twelve qualities above and asking what this card is missing or only half does:
 
 | kind | what it does |
 |---|---|
 | **Fix** | A contradiction or error — the greeting says 8 feet, the description says 7'0". The part that disagrees changes to match the canon. |
 | **Combine** | Details about one thing are scattered or said twice; they're merged into one stronger passage that keeps every detail from each. |
-| **Extend** | A thin spot where a little more helps the model play the character — a behaviour, a sensory detail, a reaction, a line in their voice. Built only on what the card already says: no new backstory, powers or plot. |
+| **Extend** | A thin spot where a little more helps the model play the character — a behaviour, a sensory detail, a reaction, a line in their voice. Built only on what the card already says: no new backstory, powers or plot. Can also **fill an empty field** — example dialogue showing a range of moods, alternate greetings that open in different situations, a scenario, or a Character's Note. |
 | **Trim** | Only true repetition or reader-facing text (credits, links, update notes). **Never pre-ticked** — removing things is always your call. |
 
   Each idea shows the passages it's about, what it fixes, how much it matters, and —
@@ -264,8 +265,27 @@ or act for `{{user}}`.
   when saved). The **lorebook is not part of the review or of Improve**: it works on
   triggers, so entries naturally overlap the card a little, and judging the card by them
   would be judging something else. It's left exactly as it is in every save.
-- **The bar is 10/10.** The critique scores each field against a card a skilled writer
-  would hold up as an example, and every suggestion is a step toward it.
+- **The bar is 10/10, spelled out.** Fast scoring, the critique and the ideas all measure
+  against the same twelve qualities of a top-tier card, with an anchored scale (10 = a card
+  to learn from, 8–9 = excellent with a gap or two, 6–7 = solid but generic in places,
+  4–5 = thin) so scores spread out instead of bunching at 7:
+
+  | | a 10/10 card… |
+  |---|---|
+  | **Operational traits** | says what each trait makes the character *do* — a default behaviour, a tell, and what breaks it — not just adjectives |
+  | **Voice** | specifies tone, rhythm, pet names and habits, how the voice shifts with mood, with examples |
+  | **{{user}}** | defines who {{user}} is to the character, how they're treated differently, what's hidden from them |
+  | **Engine** | gives goals now and ultimately, and the worldview behind them, so the model drives scenes |
+  | **Modes** | has more than one register (public/private, default/triggered) and says what flips them |
+  | **Tells** | ties features and body language to emotions, so feelings are shown, not stated |
+  | **One canon look** | describes a concrete, complete look, the same in every field |
+  | **Setting** | gives a starting situation, stakes, world rules, and something withheld |
+  | **Greeting** | opens in a sensory scene built around {{user}}, shows the character in action, ends on an invitation, never acts for {{user}} |
+  | **Examples** | each shows a different side of the character |
+  | **Direction** | tells the model the style it wants (POV, length, pacing), usually in the Character's Note |
+  | **Structure** | is easy to scan, with no section contradicting another |
+
+  It judges craft, not genre or content rating.
 - **Depth, not length.** Specific, usable detail earns credit however much of it there is;
   the faults are repetition, filler, generic phrasing, traits told but never shown, and
   contradictions between parts of the card. No token counts are shown to the model, so

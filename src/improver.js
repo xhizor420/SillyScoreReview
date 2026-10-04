@@ -26,7 +26,15 @@ export const IMPROVE_SYSTEM_PROMPT = DEFAULT_PROMPTS.improve;
 export const IDEA_KINDS = ['fix', 'combine', 'extend', 'trim'];
 const CANON_ASPECTS = ['look', 'personality', 'voice', 'goals', 'relationships', 'powers', 'setting', 'format'];
 const IMPACTS = ['high', 'medium', 'low'];
-const ACTIONS = ['replace', 'insert_after', 'insert_before'];
+const ACTIONS = ['replace', 'insert_after', 'insert_before', 'write'];
+
+// Empty fields an idea may fill. Example dialogue, alternate greetings, a
+// scenario and a Character's Note are often exactly what lifts a good card to
+// a great one — and an edit to existing text can't add them. Not personality
+// (usually already covered by the description), not the system prompts (they
+// replace the user's own), not the description (that would be inventing the
+// character).
+const FILLABLE = ['scenario', 'first_mes', 'mes_example', 'alternate_greetings', 'character_note'];
 
 function critiqueFor(result, field) {
   const f = result?.fields?.[field];
@@ -44,17 +52,20 @@ export function isV2(card) {
 }
 
 /**
- * Everything an idea or edit can point at: the card's own non-empty fields.
- * Card only — the lorebook is not reviewed or edited here.
+ * Everything an idea or edit can point at: the card's own non-empty fields,
+ * plus the empty ones worth filling (marked `empty`). Card only — the lorebook
+ * is not reviewed or edited here.
  */
 export function editTargets(card) {
   const targets = new Map();
   for (const field of SCORABLE_FIELDS) {
     const text = card.fields[field] || '';
-    if (!text.trim()) continue;
+    const empty = !text.trim();
+    if (empty && !FILLABLE.includes(field)) continue;
     // V1 cards have nowhere to store a Character's Note.
     if (field === 'character_note' && !isV2(card)) continue;
-    targets.set(field, { target: field, label: field === 'character_note' ? 'character\'s note' : field.replace(/_/g, ' '), text });
+    const label = field === 'character_note' ? 'character\'s note' : field.replace(/_/g, ' ');
+    targets.set(field, { target: field, label: empty ? `${label} (new)` : label, text: empty ? '' : text, empty });
   }
   return targets;
 }
@@ -163,6 +174,14 @@ export function placeEdits(targets, edits, { allowed = null } = {}) {
     if (!t) return fail('it points at a part of the card that does not exist');
     if (e.action === 'disable') return fail('it tries to switch something off — only card text is edited here');
     if (allowed && !allowed.has(e.target)) return fail('it changes a part of the card no chosen idea was about');
+    if (e.action === 'write' || t.empty) {
+      // Filling an empty field: the only edit that has nothing to quote.
+      if (!t.empty) return fail('"write" only fills an empty field — this one already has text');
+      if (!e.text.trim()) return fail('it adds nothing');
+      if (placed.some((p) => p.target === e.target)) return fail('this field is already being filled');
+      placed.push({ ...e, action: 'write', start: 0, end: 0, old: '', new: e.text.trim(), anchor: '' });
+      return;
+    }
     const at = locate(t.text, e.find);
     if (at.error) return fail(at.error);
     let { start, end } = at;
@@ -231,7 +250,11 @@ export function buildIdeasPrompts(card, result, { prompts = {}, draftInstruction
   }
   if (!editable.length) throw new Error('Card has no non-empty fields to improve');
 
+  const fillable = [...editTargets(card).values()].filter((t) => t.empty).map((t) => t.target);
   parts.push(`Fields you may suggest changes to: ${editable.join(', ')}.`);
+  if (fillable.length) {
+    parts.push(`Empty fields you may suggest filling (kind "extend"): ${fillable.join(', ')}.`);
+  }
   return { system: systemPrompt('ideas', prompts, draftInstructions), user: parts.join('\n'), editable };
 }
 
@@ -370,7 +393,7 @@ export function buildImprovePrompts(card, result, { prompts = {}, draftInstructi
     }
   } else {
     // No ideas chosen (a prompt test): carry out the critique's priorities.
-    const wanted = (fields?.length ? fields : SCORABLE_FIELDS).filter((f) => targets.has(f));
+    const wanted = (fields?.length ? fields : SCORABLE_FIELDS).filter((f) => targets.has(f) && !targets.get(f).empty);
     allowed = new Set(wanted);
     parts.push('No specific changes were chosen: carry out the most valuable improvements the critique names, as edits, keeping to the rules.', '');
   }
@@ -389,6 +412,10 @@ export function buildImprovePrompts(card, result, { prompts = {}, draftInstructi
   }
   for (const target of allowed) {
     const t = targets.get(target);
+    if (t.empty) {
+      parts.push(`### ${target} (EMPTY — fill it with one "write" edit)`, '');
+      continue;
+    }
     const critique = critiqueFor(result, target);
     parts.push(`### ${target}`);
     if (critique) parts.push(`Critique of this field: ${critique}`);

@@ -16,40 +16,81 @@ import { createHash } from 'node:crypto';
  * default instructions with the format reproduces them exactly.
  */
 
-const FULL_INSTRUCTIONS = `You are a critical, experienced editor for SillyTavern-style AI roleplay character cards. \
-You judge how well each field will drive an LLM to play this character well, scene after scene: writing quality, \
-specificity, clarity, voice, and consistency across the whole card.
+// What separates a top-tier card from a merely good one. Drawn from studying
+// strong, deep cards: every item is something the model can *use* in a scene,
+// not a matter of taste or genre. Shared by the critique, fast scoring and the
+// ideas step, so all three measure against the same standard.
+const TOP_TIER = `WHAT A 10/10 CARD DOES:
+1. TRAITS ARE OPERATIONAL. Each personality trait says what the character does because of it: a default \
+behaviour, a visible tell, and the condition that breaks it ("considers a scheme ruined if force was needed"; \
+"the one time her humour disappears is when {{user}} is threatened"). A list of adjectives is the weakest form.
+2. THE VOICE IS SPECIFIED AND SHOWN. Tone, rhythm, vocabulary, pet names, verbal habits, and how the voice shifts \
+with mood or situation, with short examples in the character's own words.
+3. THE RELATIONSHIP WITH {{user}} IS DEFINED. Who {{user}} is to the character, how they are treated differently \
+from everyone else, what the character hides from them, and where the lines are.
+4. THERE IS AN ENGINE. Goals at two horizons (now, and ultimately) and the worldview or self-justification behind \
+them, so the model can take initiative and drive scenes instead of only reacting.
+5. CONTRAST AND MODES. More than one register (public and private, default and triggered) and what flips between \
+them. Contradictions inside the character that are intended make it feel alive.
+6. PHYSICAL TELLS. Features, body language or habits tied to specific emotions, so feelings can be shown, not stated.
+7. ONE CANON LOOK. Appearance is concrete and complete (size, colours, distinguishing features, clothing or its \
+absence), and every field describes the same body.
+8. A PLAYABLE SETTING. A clear starting situation, stakes, the rules of this world, and something withheld or \
+unresolved for the story to discover.
+9. A GREETING THAT HOOKS. It opens in a concrete scene with sensory detail, is built around {{user}}'s situation, \
+shows the character's voice and method in action rather than describing them, ends on an invitation or open \
+question, and never speaks, acts or decides for {{user}}.
+10. EXAMPLES WITH RANGE. Each example dialogue shows a different side of the character in their own voice, not the \
+same mood repeated.
+11. DIRECTION FOR THE MODEL. Where the card wants a particular style (point of view, length, pacing, what to \
+describe), it says so in clear, actionable instructions, usually in the Character's Note.
+12. CLEAN STRUCTURE. Labelled sections or one consistent format the model can scan, and no section contradicting \
+another.`;
 
-THE BAR IS 10/10: a card a skilled writer would hold up as an example — a character the model can play vividly and \
-consistently, in its own voice, for hundreds of messages. Score against that bar, and make every suggestion a step \
-toward it.
+const SCALE = `SCORING SCALE — use the whole range, and be consistent across cards:
+10 = does all of the above; a card to learn from. 8-9 = excellent, with one or two gaps. 6-7 = solid but generic in \
+places, traits partly unshown, or a notable inconsistency. 4-5 = thin: mostly adjectives, a generic greeting, little \
+for the model to act on. 2-3 = barely a character. 1 = empty or broken.
+For a field, judge it on the qualities that belong to it (the greeting on 9, examples on 10, the description on most \
+of the rest). Judge craft, not genre or content rating: dark, mature or explicit material is judged on how well it is \
+written and how playable it is.`;
 
-JUDGE DEPTH, NOT LENGTH. Detail that gives the model something specific to play — a look it can describe the same \
-way every time, behaviours, speech patterns, goals and motivation, relationships, rules of the world, hooks for \
-{{user}} — is depth, and a rich card earns credit for it. Length on its own is never a fault, and a short card is \
-not better for being short. The faults are: the same thing said twice, filler and summary that add nothing, generic \
-phrasing that could describe any character, traits that are only asserted and never shown, and instructions the \
+const FULL_INSTRUCTIONS = `You are a demanding, experienced editor of SillyTavern character cards. You judge how \\
+well each field will make an LLM play this character vividly and consistently, scene after scene, for hundreds of \\
+messages.
+
+${TOP_TIER}
+
+${SCALE}
+Do not be generous: these scores decide which cards are kept and which are improved.
+
+JUDGE DEPTH, NOT LENGTH. Specific, usable detail is depth, and a rich card earns credit for it however long it is. \\
+A short card is not better for being short. The faults are: the same thing said twice, filler and summary that add \\
+nothing, generic phrasing that could describe any character, traits asserted but never shown, and instructions the \\
 model cannot act on.
 
-CHECK CONSISTENCY ACROSS THE WHOLE CARD. The description is the reference for who the character is and what they \
-look like. The first message, example dialogue, scenario and character_note must agree with it. Name every contradiction with both versions — height, colours, body, clothing, powers, setting facts, how they \
-treat {{user}}. Contradictions make the model flip between versions mid-chat, and they are among the most damaging \
+CHECK CONSISTENCY ACROSS THE WHOLE CARD. The description is the reference for who the character is and what they \\
+look like. The first message, example dialogue, scenario and character_note must agree with it. Name every \\
+contradiction with both versions — height, colours, body, hands and feet, clothing, powers, setting facts, how they \\
+treat {{user}}. Contradictions make the model flip between versions mid-chat, and they are among the most damaging \\
 faults a rich card can have.
 
-character_note is SillyTavern's Character's Note: an instruction inserted into the chat every few messages. Judge \
-it as instructions to the model — clear, actionable, consistent with the card.
+character_note is SillyTavern's Character's Note: an instruction inserted into the chat every few messages. Judge \\
+it as direction to the model — clear, actionable, consistent with the card.
 
-SUGGESTIONS MUST KEEP THE CHARACTER. Prefer: fixing contradictions in favour of the description; combining \
-scattered or repeated details into one stronger passage that keeps every detail; extending thin spots with concrete \
-behaviour, sensory detail or a line of dialogue in the character's voice. Never suggest cutting a distinctive \
-detail. Suggest removing only true repetition, and say where the detail remains.
+SUGGESTIONS MUST KEEP THE CHARACTER. Each suggestion is a step toward 10/10 that keeps everything that makes the \\
+character itself: fix contradictions in favour of the description; combine scattered details into one stronger \\
+passage that keeps them all; extend thin spots with concrete behaviour, tells, sensory detail or a line of dialogue \\
+in the character's voice; add what a 10/10 card has and this one lacks (say which quality it adds). Never suggest \\
+cutting a distinctive detail. If an empty field (listed below) would add real value — example dialogue, alternate \\
+greetings, a Character's Note — say so in the priorities.
 
 Rate this character card on a scale of 1-10 for each field provided.
 
 For each field:
 1. Score (1-10)
 2. Strengths - What works well
-3. Weaknesses - What needs improvement (name contradictions with both versions)
+3. Weaknesses - What keeps it from 10/10 (name contradictions with both versions)
 4. Suggestions - Concrete changes that would take this field to 10/10 while keeping the character
 
 Then provide:
@@ -57,7 +98,7 @@ Then provide:
 - Top 3 Priority Improvements (the changes that would raise the card most)
 - Summary
 
-Be critical but constructive. Specific, actionable feedback only — one or two sentences per entry.`;
+Be specific and actionable — one or two sentences per entry.`;
 
 const FULL_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary before or after) matching \
 exactly this shape:
@@ -71,16 +112,19 @@ exactly this shape:
 }
 Include an entry in "fields" for every field given to you below, using the exact field name shown.`;
 
-const FAST_INSTRUCTIONS = `You are a critical, experienced editor for SillyTavern-style AI roleplay \
-character cards. You judge how well each field will drive an LLM to play this character well: writing quality, \
-specificity, voice, and consistency with the rest of the card.
+const FAST_INSTRUCTIONS = `You are a demanding, experienced editor of SillyTavern character cards. You judge \
+how well each field will make an LLM play this character vividly and consistently, scene after scene.
+
+${TOP_TIER}
+
+${SCALE}
 
 Judge depth, not length: specific, usable detail is a strength however much of it there is; repetition, filler, \
 generic phrasing and contradictions between fields are the faults. A field that contradicts the description (a \
 different height, colour, body or personality) scores lower for it.
 
-Rate each field you are given from 1-10, applying the same standard you would if you were writing out the \
-full critique. Do not be generous: the scores are used to decide which cards get deleted.`;
+Apply exactly the standard you would if you were writing out the full critique. Do not be generous: the scores are \
+used to find the best cards and decide which get deleted.`;
 
 const FAST_FORMAT = `Respond with ONLY a single valid JSON object, no markdown fences and no commentary, in exactly this shape:
 {"fields": {"<field_name>": <1-10 integer>}, "overall_score": <number 1-10, one decimal>}
@@ -111,7 +155,12 @@ the world. Build only on what the card already establishes. No filler, no summar
 actions). Keep {{char}} and {{user}} macros. New text should read as if the original author wrote it.
 5. PRECISE QUOTES. Make "find" the shortest passage that appears exactly once in that field — usually one sentence \
 or one line — copied character for character.
-6. CARD TEXT ONLY. No notes, labels or commentary inside the text.`;
+6. NEW FIELDS. An empty field marked EMPTY is filled with one "write" edit. Example dialogue (mes_example) is a few \
+<START> blocks, each showing a different side of the character in their own voice, with {{char}}: lines and at \
+most a short {{user}}: line to prompt them. Alternate greetings are complete, distinct openings in different \
+situations, separated by a line containing only ---, each in the same style as the first message and never acting \
+for {{user}}. A Character's Note is short, direct instructions to the model.
+7. CARD TEXT ONLY. No notes, labels or commentary inside the text.`;
 
 const IMPROVE_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary) in exactly this shape:
 {
@@ -119,7 +168,7 @@ const IMPROVE_FORMAT = `Respond with ONLY a single valid JSON object (no markdow
     {
       "idea": <the number of the chosen change this edit carries out>,
       "field": "<field name>",
-      "action": "replace" | "insert_after" | "insert_before",
+      "action": "replace" | "insert_after" | "insert_before" | "write",
       "find": "<a passage copied exactly from that field>",
       "text": "<the new text>",
       "why": "<one short sentence>"
@@ -129,7 +178,9 @@ const IMPROVE_FORMAT = `Respond with ONLY a single valid JSON object (no markdow
 }
 "replace": "text" takes the place of "find" (use "" only when the chosen change is to remove that passage). \
 "insert_after" / "insert_before": "text" is added right after / before "find", which stays; start or end "text" \
-with the space or line break it needs. One chosen change may need several edits, in different places or fields.`;
+with the space or line break it needs. "write": fills a field marked EMPTY with "text"; leave "find" empty. To add \
+another alternate greeting to ones that exist, insert_after the end of the last greeting with "text" starting \
+"\\n\\n---\\n\\n". One chosen change may need several edits, in different places or fields.`;
 
 // ---- improvement ideas: the step between rating and rewriting ----
 
@@ -154,10 +205,18 @@ establishes: never invent backstory, powers, relatives or plot twists.
 - "trim": only for true repetition, or reader-facing text (credits, links, update notes) inside the card. Say where \
 the detail remains. Never trim a distinctive detail.
 
-A rich card rarely needs cutting. Look for what would make its depth work better: contradictions between the \
-description, the greeting and the examples; scattered details that would be stronger together; traits that are \
-told but never shown; a greeting or example that drifts from the canon look or voice; a goal or relationship the \
-card names but never gives the model a way to play.
+A rich card rarely needs cutting. Go through the 10/10 qualities below one by one and ask what this card is \
+missing or only half does. The best ideas usually: fix contradictions between the description, the greeting and the \
+examples; turn adjectives into behaviour with a tell and a breaking point; give the voice concrete patterns and \
+examples; define what {{user}} is to the character; give the character goals that let the model take initiative; \
+add tells that show emotion; and combine scattered details into stronger passages.
+
+Empty fields can be filled (kind "extend", field = the empty field) when it adds real value: example dialogue \
+(mes_example) showing a range of moods in <START> blocks, alternate greetings that open in genuinely different \
+situations, a scenario, or a Character's Note with clear direction (point of view, length, pacing). Do not fill a \
+field whose content the card already covers elsewhere.
+
+${TOP_TIER}
 
 Also check the card against the Character Card V2 spec and SillyTavern practice:
 - system_prompt and post_history_instructions REPLACE the user's own system prompt and jailbreak unless they \

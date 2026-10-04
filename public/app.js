@@ -1842,6 +1842,10 @@ function contextOf(text, start, end, n = 150) {
 }
 
 function editSidesHtml(p, e) {
+  if (e.action === 'write') {
+    return `<div class="edit-side side-old"><span class="hunk-label">Card now</span><i>Empty — the card has no ${escapeHtml(p.label.replace(/ \(new\)$/, ''))} yet.</i></div>
+      <div class="edit-side side-new"><span class="hunk-label">With this change</span><span class="edit-new">${escapeHtml(e.new)}</span></div>`;
+  }
   const { pre, post } = contextOf(p.before, e.start, e.end);
   const w = TextDiff.wordDiff(e.old, e.new);
   const caret = (title) => `<span class="edit-caret" title="${title}">⁁</span>`;
@@ -1852,7 +1856,7 @@ function editSidesHtml(p, e) {
 }
 
 function actionLabel(e) {
-  return { replace: e.new ? 'Reworded' : 'Removed', insert_after: 'Added', insert_before: 'Added' }[e.action] || 'Change';
+  return { replace: e.new ? 'Reworded' : 'Removed', insert_after: 'Added', insert_before: 'Added', write: 'New field' }[e.action] || 'Change';
 }
 
 function editCardHtml(p, pi, e, ei) {
