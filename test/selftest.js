@@ -432,6 +432,7 @@ async function main() {
   await testRunSupervision();
   await testEditablePrompts();
   await testIdeasThenRewrite();
+  await testChangePicker();
 
   console.log('\nAll self-tests passed.');
 }
@@ -1511,6 +1512,60 @@ async function testIdeasThenRewrite() {
   const noMove = await improveCard(parsed, null, rewriteProvider, { plan: { ideas: [{ ...ideas.ideas[0], lorebook: false }], keep: [], keepQuotes: [] } });
   assert.equal(noMove.lorebookEntries.length, 0, 'entries nobody asked for are not accepted');
   console.log('✓ lorebook entries are only accepted when you chose a lorebook move');
+}
+
+/**
+ * The comparison behind "allow each change". It runs in the browser, so it's
+ * loaded here the way the page loads it — as a plain script — in a sandbox.
+ */
+async function testChangePicker() {
+  const vm = await import('node:vm');
+  const box = {};
+  box.globalThis = box;
+  vm.createContext(box);
+  vm.runInContext(await readFile(path.join(PROJECT_ROOT, 'public/textDiff.js'), 'utf8'), box);
+  const T = box.TextDiff;
+
+  const awkward = [
+    'Wren is tall. She wears a coat!\n\n*She looks up.* "Storm\'s coming, {{user}}." Then nothing…',
+    '[Wren: personality("dry" + "watchful"); clothes("grey coat")]\n[Wren: likes("tea")]',
+    'Mr. Smith arrived. 3.5 metres?! Yes.', '', 'no terminators at all',
+  ];
+  for (const t of awkward) assert.equal(T.splitUnits(t).join(''), t, `splitting must not lose text: ${JSON.stringify(t)}`);
+  console.log('✓ the comparison splits text into sentences without losing a single character');
+
+  // The case that motivated it: trim body + outfit, but keep the outfit.
+  const before = 'Wren keeps the lighthouse. She is tall, lean and weathered, with salt-white hair. She wears a long grey oilskin coat with brass buttons and a red wool scarf. She is very very mysterious and also mysterious. She trusts the sea.';
+  const after = 'Wren keeps the lighthouse. She is tall and weathered. She wears a grey coat. She trusts the sea.';
+  const parts = T.diffText(before, after);
+  assert.equal(T.changeCount(parts), 3, 'body trim, outfit trim and filler removal are three separate choices');
+  const keepOutfit = T.compose(parts, ['new', 'old', 'new'], { before, after });
+  assert.equal(keepOutfit, 'Wren keeps the lighthouse. She is tall and weathered. She wears a long grey oilskin coat with brass buttons and a red wool scarf. She trusts the sea.');
+  assert.equal(T.compose(parts, ['new', 'new', 'new'], { before, after }), after, 'allowing everything gives exactly the suggestion');
+  assert.equal(T.compose(parts, ['old', 'old', 'old'], { before, after }), before, 'allowing nothing gives exactly the original');
+  console.log('✓ each changed sentence is its own choice — keep the outfit, take the rest — and all/none reproduce each version exactly');
+
+  // Randomised: any mix of choices yields text made only of original or
+  // suggested sentences — never a garbled blend.
+  const pool = ['She hums at the lamp.', 'Gulls follow her boat.', 'Her coat is grey.', 'She hates small talk.',
+    'The keeper drinks black tea.', 'Storms do not scare her.', 'She counts ships at dawn.', '"Get inside, {{user}}."'];
+  let seed = 7;
+  const rand = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  for (let trial = 0; trial < 300; trial++) {
+    const a = Array.from({ length: 3 + rand(5) }, () => pool[rand(pool.length)]);
+    const b = a.filter(() => rand(4) !== 0).map((x) => (rand(3) === 0 ? x.replace(/\.$/, ', mostly.') : x));
+    if (rand(2)) b.splice(rand(b.length + 1), 0, pool[rand(pool.length)]);
+    const A = a.join(' ');
+    const B = b.join(' ');
+    const ps = T.diffText(A, B);
+    const n = T.changeCount(ps);
+    assert.equal(T.compose(ps, Array(n).fill('new'), { before: A, after: B }), B);
+    assert.equal(T.compose(ps, Array(n).fill('old'), { before: A, after: B }), A);
+    const mixed = T.compose(ps, Array.from({ length: n }, () => (rand(2) ? 'new' : 'old')));
+    const allowed = new Set([...T.splitUnits(A), ...T.splitUnits(B)].map((u) => u.trim()));
+    for (const u of T.splitUnits(mixed)) assert.ok(allowed.has(u.trim()), `trial ${trial}: "${u}" is neither original nor suggested`);
+  }
+  console.log('✓ 300 random edits: every mix of allowed and kept changes is clean text from one version or the other');
 }
 
 main().catch((err) => {

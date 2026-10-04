@@ -197,18 +197,29 @@ The ideas also check the card against the
 | `{{char}}` / `{{user}}` | Hard-coded names where the card means the character or the user. |
 | **Lorebook moves** | Background that only matters in some scenes can move out of an always-sent field into **lorebook entries**, which SillyTavern only sends when a keyword comes up. Nothing is deleted, and every turn costs fewer tokens. |
 
-**3 · Review the rewrite.** Only the fields your ticked ideas touch are sent to the model
+**3 · Compare and allow.** Only the fields your ticked ideas touch are sent to the model
 at all — and if it rewrites anything else anyway, that is thrown away. What comes back is
-a **draft, not a file**:
+**a set of suggestions, not changes**: nothing is applied until you allow it.
 
-- the original and the rewrite side by side, each editable, with a live token count
-  (`180 → 140 tok (-40)`) and the reason for each change;
-- **Revert this field** to throw away any rewrite you don't like;
-- any **new lorebook entries**, with editable keywords and text (or remove one to leave
-  that text out). Moved text keeps the card's own wording; existing entries are untouched.
+- Each field is broken into its **individual changes, original next to suggestion**, with
+  the differing words marked. A rewrite that trims the body description, trims the outfit
+  and deletes a filler line is **three separate choices** — keep the original outfit and
+  allow the other two. Each change has **Keep original** / **Allow change**; every field has
+  *Allow all* and *Keep all original*.
+- Below the changes is the **final text** — exactly what will be saved, updating as you
+  allow things. Edit it however you like. Once you type in it, that field's buttons pause
+  (they'd overwrite your edit) until you choose *Discard my edits and go back to the choices*.
+- **Lorebook entries** are suggestions too — tick *Add this lorebook entry* to include one,
+  and edit its keywords or text. Because a lorebook move is two halves (text leaves the
+  field, an entry holds it), you're warned if they disagree: text moved out with no entry
+  would be **lost**; an entry added while the text is still in the field would be **sent
+  twice**.
+- Live checks on the final text: a field that got longer, a lost `{{user}}`/`{{char}}`,
+  or one of your protected lines going missing.
 
-Save it as a **new card** (the default — the original is untouched and keeps its score)
-or **replace the original** (a copy of the pre-edit file goes to Trash). Leave *Score it
+Save it as a **new card file** — `Name (improved).png`, the default, with your original
+PNG untouched and keeping its score — or **replace the original** (a copy of the pre-edit
+file goes to Trash). Leave *Score it
 after saving* ticked to see the before/after straight away: **5.1 → 8.2 (+3.1)**.
 
 Because the improved card keeps the character's name, it lands in the same duplicate

@@ -348,6 +348,54 @@ body.density-compact .card-meta { font-size: 10px; }
 .try-it select { width: 100%; }
 .test-result .overall-block { margin-top: 8px; }
 
+/* --- compare & pick: each suggested change, original beside suggestion --- */
+.pick-summary {
+  margin: 10px 0 4px; padding: 9px 12px; border-radius: 6px; font-size: 13px;
+  background: rgba(124,156,255,0.10); border: 1px solid var(--accent);
+}
+.pick-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.pick-bar .folder-hint { flex: 1 1 auto; margin: 0; }
+.diff {
+  padding: 10px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border);
+  font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+.diff-same { color: var(--text-dim); }
+.diff-fold { margin: 0 4px; font-size: 11px; white-space: nowrap; }
+.hunk {
+  margin: 8px 0; padding: 8px; border-radius: 8px; white-space: normal;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.hunk-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.hunk-side { padding: 8px 10px; border-radius: 6px; border: 1px solid transparent; white-space: pre-wrap; }
+.hunk-label {
+  display: block; margin-bottom: 4px; font-size: 10.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
+}
+.hunk-old { background: rgba(229,88,107,0.06); }
+.hunk-new { background: rgba(79,191,122,0.06); }
+/* the side you picked is outlined; the other fades */
+.hunk.is-old .hunk-old { border-color: var(--red); }
+.hunk.is-new .hunk-new { border-color: var(--green); }
+.hunk.is-old .hunk-new, .hunk.is-new .hunk-old { opacity: 0.45; }
+.hunk.is-locked { opacity: 0.6; }
+mark.w-del { background: rgba(229,88,107,0.22); color: inherit; border-radius: 3px; }
+/* struck through only once the change is allowed — kept text must not look deleted */
+.hunk.is-new mark.w-del { text-decoration: line-through; }
+mark.w-add { background: rgba(79,191,122,0.28); color: inherit; border-radius: 3px; }
+.hunk-pick { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+.hunk-pick button[aria-pressed="true"][data-pick="old"] { border-color: var(--red); color: var(--text); background: rgba(229,88,107,0.12); }
+.hunk-pick button[aria-pressed="true"][data-pick="new"] { border-color: var(--green); color: var(--text); background: rgba(79,191,122,0.12); }
+.hand-note {
+  margin-top: 6px; padding: 8px 10px; border-radius: 6px; font-size: 12px;
+  background: rgba(224,178,58,0.12); border: 1px solid var(--yellow); color: var(--yellow);
+}
+.hand-note button { margin-left: 6px; }
+.lore-dupe { margin-top: 6px; }
+.lore-include { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13px; cursor: pointer; }
+.lore-include input { width: 18px; height: 18px; }
+.lore-entry { opacity: 0.75; }
+.lore-entry.is-included { opacity: 1; }
+
 /* --- improve: steps, keep list, ideas, lorebook moves --- */
 .stepper { display: flex; gap: 6px; list-style: none; padding: 0; margin: 4px 0 14px; flex-wrap: wrap; }
 .stepper li {
@@ -362,7 +410,7 @@ body.density-compact .card-meta { font-size: 10px; }
   background: var(--panel-2); border: 1px solid var(--border);
 }
 .keep-box h3, .lorebook-box h3, .ideas-list h3 { margin: 0 0 4px; font-size: 13.5px; }
-.keep-box textarea, .lorebook-box input {
+.keep-box textarea, .lorebook-box input[type="text"] {
   width: 100%; padding: 8px 10px; background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical;
 }
@@ -648,12 +696,17 @@ body.select-mode .card-checkbox { width: 26px; height: 26px; }
   .prompt-actions button { flex: 1 1 45%; min-height: 44px; }
   .tab { min-height: 42px; }
   .idea { padding: 12px; }
+  .hunk-sides { grid-template-columns: 1fr; }          /* original above suggestion on a phone */
+  .hunk-pick button { flex: 1; min-height: 44px; }
+  .pick-bar button { min-height: 42px; flex: 1 1 45%; }
   .idea input { width: 22px; height: 22px; }
   button.small { min-height: 42px; min-width: 42px; padding: 0 12px; }
   .modal { padding: 16px; }
   .modal-actions { flex-wrap: wrap; }
   .modal-actions button { min-height: 44px; flex: 1 1 45%; }
-  .editor-buttons button { min-height: 44px; flex: 1 1 100%; }
+  /* one row of three, so the sticky footer doesn't cover the comparison */
+  .editor-buttons { flex-wrap: nowrap; gap: 6px; }
+  .editor-buttons button { min-height: 44px; flex: 1 1 0; padding: 0 6px; font-size: 13px; line-height: 1.15; }
   .editor-text { font-size: 13px; }
   .editor-row-actions button { min-height: 36px; }
   .scan-head { flex-wrap: wrap; gap: 8px; }

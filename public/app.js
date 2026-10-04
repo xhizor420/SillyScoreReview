@@ -1500,14 +1500,65 @@ function fieldLabel(field) {
 
 /** Rows for the "Improve with AI" review: only the fields the model rewrote. */
 function rowsFromProposal(data) {
-  return Object.entries(data.fields).map(([field, f]) => ({
-    field,
-    before: data.before[field] ?? '',
-    after: f.text,
-    why: f.why || '',
-    inflated: f.inflated,
-    lostMacros: f.lostMacros,
-  }));
+  return Object.entries(data.fields).map(([field, f]) => {
+    const before = data.before[field] ?? '';
+    const parts = TextDiff.diffText(before, f.text);
+    return {
+      field,
+      before,
+      proposed: f.text,
+      after: before,
+      parts,
+      // One choice per change, starting on the ORIGINAL: nothing is applied
+      // until you look at it side by side and allow it.
+      choices: parts.filter((p) => p.type === 'change').map(() => 'old'),
+      handEdited: false,
+      why: f.why || '',
+      inflated: f.inflated,
+      lostMacros: f.lostMacros,
+    };
+  });
+}
+
+/** The text a row's current choices produce. */
+function composedText(row) {
+  return TextDiff.compose(row.parts, row.choices, { before: row.before, after: row.proposed });
+}
+
+function highlightWords(tokens, cls) {
+  return tokens.map((t) => (t.changed ? `<mark class="${cls}">${escapeHtml(t.text)}</mark>` : escapeHtml(t.text))).join('');
+}
+
+/**
+ * One field's suggested rewrite as individual changes, original beside
+ * suggestion, each with its own Keep original / Use suggestion choice. Long
+ * stretches of unchanged text are folded so the changes stand out.
+ */
+function diffHtml(row, i) {
+  let k = 0;
+  return row.parts.map((p) => {
+    if (p.type === 'same') {
+      const t = p.text;
+      if (t.length <= 260) return `<span class="diff-same">${escapeHtml(t)}</span>`;
+      const hidden = t.slice(110, -110);
+      const n = (hidden.match(/\S+/g) || []).length;
+      return `<span class="diff-same">${escapeHtml(t.slice(0, 110))}<button class="diff-fold secondary small" data-unfold="${escapeHtml(encodeURIComponent(hidden))}">… ${n} unchanged words …</button>${escapeHtml(t.slice(-110))}</span>`;
+    }
+    const idx = k++;
+    const choice = row.choices[idx];
+    const w = TextDiff.wordDiff(p.old, p.new);
+    const kind = !p.old.trim() ? 'added' : !p.new.trim() ? 'removed' : 'reworded';
+    return `<div class="hunk is-${choice} ${row.handEdited ? 'is-locked' : ''}" data-hunk="${i}-${idx}">
+      <div class="hunk-sides">
+        <div class="hunk-side hunk-old"><span class="hunk-label">Original</span>${p.old.trim() ? highlightWords(w.old, 'w-del') : '<i class="dim">(nothing here — the suggestion adds this)</i>'}</div>
+        <div class="hunk-side hunk-new"><span class="hunk-label">Suggestion</span>${p.new.trim() ? highlightWords(w.new, 'w-add') : '<i class="dim">(removed)</i>'}</div>
+      </div>
+      <div class="hunk-pick" role="group" aria-label="Change ${idx + 1}: ${kind}">
+        <button class="secondary" data-pick="old" data-row="${i}" data-k="${idx}" aria-pressed="${choice === 'old'}" ${row.handEdited ? 'disabled' : ''}>Keep original</button>
+        <button class="secondary" data-pick="new" data-row="${i}" data-k="${idx}" aria-pressed="${choice === 'new'}" ${row.handEdited ? 'disabled' : ''}>Allow change</button>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 /** Rows for hand-editing: every field that has text, unchanged to start with. */
@@ -1526,18 +1577,23 @@ function renderEditor() {
 
   html += `<div class="editor-intro">`;
   if (improving) {
-    html += `<p>${escapeHtml(headline || 'The model rewrote the fields below.')}</p>
-      <p class="folder-hint">Nothing has been saved yet. Edit any of it by hand, then save — by default as a
-      <b>new card</b>, leaving the original untouched.${previousScore != null ? ` The original scores <b>${previousScore}/10</b>.` : ''}</p>`;
+    html += `<p>${escapeHtml(headline || 'The model suggested the changes below.')}</p>
+      <p class="folder-hint">Nothing is applied or saved yet. Saving makes a <b>new card file</b> by default —
+      your original PNG is never touched.${previousScore != null ? ` The original scores <b>${previousScore}/10</b>.` : ''}</p>`;
   } else {
     html += `<p class="folder-hint">Edit the card's own text. Saving as a new card leaves the original alone;
       replacing it keeps a restorable copy in Trash either way.</p>`;
   }
   html += `</div>`;
 
+  if (improving && rows.some((r) => r.parts)) {
+    html += `<p class="pick-summary" id="pickSummary"></p>`;
+  }
+
   html += rows
     .map((row, i) => {
       const changed = row.after !== row.before;
+      const comparing = Boolean(row.parts && TextDiff.changeCount(row.parts));
       return `<div class="editor-row ${changed ? 'is-changed' : ''}" data-row="${i}">
         <div class="field-title">
           <span>${escapeHtml(fieldLabel(row.field))}</span>
@@ -1545,16 +1601,26 @@ function renderEditor() {
         </div>
         ${row.why ? `<div class="field-sub"><b>Change:</b> ${escapeHtml(row.why)}</div>` : ''}
         <div class="editor-warnings" data-warn="${i}"></div>
-        ${row.before
-          ? `<details class="before-block">
-               <summary>Original (${tokensOf(row.before)} tok)</summary>
-               <pre class="card-field-text">${escapeHtml(row.before)}</pre>
-             </details>`
-          : ''}
-        <textarea class="editor-text" data-text="${i}" rows="8" spellcheck="false">${escapeHtml(row.after)}</textarea>
-        <div class="editor-row-actions">
-          <button class="secondary" data-revert="${i}">Revert this field</button>
+        ${comparing
+          ? `<div class="pick-bar">
+               <span class="folder-hint" data-pick-count="${i}"></span>
+               <button class="secondary" data-all-new="${i}">Allow all in this field</button>
+               <button class="secondary" data-revert="${i}">Keep all original</button>
+             </div>
+             <div class="diff" data-diff="${i}">${diffHtml(row, i)}</div>
+             <label class="field-label" for="final-${i}">Final text — exactly what will be saved. Edit it freely.</label>`
+          : row.before && row.before !== row.after
+            ? `<details class="before-block">
+                 <summary>Original (${tokensOf(row.before)} tok)</summary>
+                 <pre class="card-field-text">${escapeHtml(row.before)}</pre>
+               </details>`
+            : ''}
+        <textarea class="editor-text" id="final-${i}" data-text="${i}" rows="${comparing ? 5 : 8}" spellcheck="false">${escapeHtml(row.after)}</textarea>
+        <div class="hand-note ${row.handEdited ? '' : 'hidden'}" data-hand="${i}">
+          You've edited this field by hand, so the choices above are paused (they'd overwrite your edit).
+          <button class="secondary small" data-rechoose="${i}">Discard my edits and go back to the choices</button>
         </div>
+        ${comparing ? '' : `<div class="editor-row-actions"><button class="secondary" data-revert="${i}">Revert this field</button></div>`}
       </div>`;
     })
     .join('');
@@ -1565,7 +1631,9 @@ function renderEditor() {
       <p class="folder-hint">Lorebook entries are only sent to the model when one of their keywords comes up in the
       chat, so this text stops costing tokens every turn. Edit the keywords or the text, or remove an entry to leave
       that text out. Existing lorebook entries are kept as they are.</p>
-      ${editor.lorebook.map((e, i) => `<div class="lore-entry" data-lore="${i}">
+      ${editor.lorebook.map((e, i) => `<div class="lore-entry ${e.include ? 'is-included' : ''}" data-lore="${i}">
+        <label class="lore-include"><input type="checkbox" data-lore-include="${i}" ${e.include ? 'checked' : ''} /> Add this lorebook entry</label>
+        <div class="lore-dupe" data-lore-check="${i}"></div>
         <label class="field-label">Keywords (comma-separated)</label>
         <input type="text" data-lore-keys="${i}" value="${escapeHtml(e.keys)}" />
         <textarea class="editor-text" data-lore-text="${i}" rows="4">${escapeHtml(e.content)}</textarea>
@@ -1621,15 +1689,86 @@ function renderEditor() {
     renderLostQuotes();
   }
 
-  rows.forEach((_, i) => {
+  // ---- per-change choices ----
+  const hasChoices = (row) => Boolean(row.parts && TextDiff.changeCount(row.parts));
+
+  function renderPickState(i) {
+    const row = editor.rows[i];
+    if (!hasChoices(row)) return;
+    els.modalBody.querySelector(`[data-diff="${i}"]`).innerHTML = diffHtml(row, i);
+    const used = row.choices.filter((c) => c === 'new').length;
+    els.modalBody.querySelector(`[data-pick-count="${i}"]`).textContent = row.handEdited
+      ? 'Edited by hand'
+      : `Allowed ${used} of ${row.choices.length} change${row.choices.length === 1 ? '' : 's'}`;
+    els.modalBody.querySelector(`[data-hand="${i}"]`).classList.toggle('hidden', !row.handEdited);
+    const summary = els.modalBody.querySelector('#pickSummary');
+    if (summary) {
+      const all = editor.rows.filter(hasChoices);
+      const total = all.reduce((n, r) => n + r.choices.length, 0);
+      const taken = all.reduce((n, r) => n + r.choices.filter((c) => c === 'new').length, 0);
+      summary.textContent = `Allowed ${taken} of ${total} suggested change${total === 1 ? '' : 's'}. ` +
+        'Nothing is applied until you allow it: compare each change side by side, allow the ones you want, ' +
+        'then edit the final text however you like.';
+    }
+  }
+
+  // Apply the choices to the final text (unless you've taken over by hand).
+  function applyChoices(i) {
+    const row = editor.rows[i];
+    row.handEdited = false;
+    els.modalBody.querySelector(`[data-text="${i}"]`).value = composedText(row);
     refreshRow(i);
-    els.modalBody.querySelector(`[data-text="${i}"]`).addEventListener('input', () => refreshRow(i));
-    els.modalBody.querySelector(`[data-revert="${i}"]`).addEventListener('click', () => {
-      els.modalBody.querySelector(`[data-text="${i}"]`).value = editor.rows[i].before;
-      refreshRow(i);
-    });
+    renderPickState(i);
+  }
+
+  els.modalBody.addEventListener('click', (e) => {
+    const pick = e.target.closest('[data-pick]');
+    if (pick && !pick.disabled) {
+      const row = editor.rows[Number(pick.dataset.row)];
+      row.choices[Number(pick.dataset.k)] = pick.dataset.pick;
+      applyChoices(Number(pick.dataset.row));
+      return;
+    }
+    const unfold = e.target.closest('[data-unfold]');
+    if (unfold) unfold.replaceWith(document.createTextNode(decodeURIComponent(unfold.dataset.unfold)));
   });
 
+  rows.forEach((row, i) => {
+    refreshRow(i);
+    renderPickState(i);
+    els.modalBody.querySelector(`[data-text="${i}"]`).addEventListener('input', (e) => {
+      // Typing in the final text means you've taken over this field: the
+      // per-change buttons would overwrite your edit, so they pause.
+      if (hasChoices(row) && !row.handEdited && e.target.value !== composedText(row)) {
+        row.handEdited = true;
+        renderPickState(i);
+      }
+      refreshRow(i);
+    });
+    els.modalBody.querySelector(`[data-revert="${i}"]`).addEventListener('click', () => {
+      if (hasChoices(row)) {
+        row.choices = row.choices.map(() => 'old');
+        applyChoices(i);
+      } else {
+        els.modalBody.querySelector(`[data-text="${i}"]`).value = row.before;
+        refreshRow(i);
+      }
+    });
+    els.modalBody.querySelector(`[data-all-new="${i}"]`)?.addEventListener('click', () => {
+      row.choices = row.choices.map(() => 'new');
+      applyChoices(i);
+    });
+    els.modalBody.querySelector(`[data-rechoose="${i}"]`)?.addEventListener('click', () => applyChoices(i));
+  });
+
+  for (const box of els.modalBody.querySelectorAll('[data-lore-include]')) {
+    box.addEventListener('change', () => {
+      const n = Number(box.dataset.loreInclude);
+      editor.lorebook[n].include = box.checked;
+      box.closest('.lore-entry').classList.toggle('is-included', box.checked);
+      renderLostQuotes();
+    });
+  }
   for (const input of els.modalBody.querySelectorAll('[data-lore-keys]')) {
     input.addEventListener('input', () => { editor.lorebook[Number(input.dataset.loreKeys)].keys = input.value; renderLostQuotes(); });
   }
@@ -1655,7 +1794,31 @@ function renderEditor() {
  * live, so restoring a line by hand clears the warning. Only lines that were in
  * a field being rewritten can go missing — untouched fields keep theirs.
  */
+/**
+ * A lorebook move is two halves: text leaves a field, and an entry holding it is
+ * added. Allowed separately they can disagree — text removed but no entry
+ * (it would be lost), or an entry added while the text is still in the field
+ * (it would be sent twice). Say so on the entry.
+ */
+function renderLoreChecks() {
+  if (!editor?.lorebook?.length) return;
+  const finalText = editor.rows.map((r) => r.after).join('\n');
+  const originalText = editor.rows.map((r) => r.before).join('\n');
+  editor.lorebook.forEach((e, i) => {
+    const el = els.modalBody.querySelector(`[data-lore-check="${i}"]`);
+    if (!el) return;
+    const sentences = TextDiff.splitUnits(e.content).map((u) => u.trim()).filter((u) => u.length > 20);
+    const stillInCard = sentences.some((u) => finalText.includes(u));
+    const wasInCard = sentences.some((u) => originalText.includes(u));
+    let msg = '';
+    if (e.include && stillInCard) msg = '⚠ This text is still in the card too, so it would be sent twice. Allow the change that moves it out, or don\'t add this entry.';
+    else if (!e.include && wasInCard && !stillInCard) msg = '⚠ You allowed moving this text out of the card, but this entry isn\'t added — the text would be lost. Add the entry, or keep the original.';
+    el.innerHTML = msg ? `<div class="editor-warning ${msg.includes('lost') ? 'tone-bad' : ''}">${escapeHtml(msg)}</div>` : '';
+  });
+}
+
 function renderLostQuotes() {
+  renderLoreChecks();
   const box = els.modalBody.querySelector('#lostQuotes');
   if (!box || !editor?.keepQuotes?.length) return;
   const after = editor.rows.map((r) => r.after).concat((editor.lorebook || []).map((e) => e.content)).join('\n');
@@ -1675,12 +1838,18 @@ async function saveEditor(mode) {
     if (row.after !== row.before) changed[row.field] = row.after;
   }
   const lorebookEntries = (editor.lorebook || [])
+    .filter((e) => e.include)
     .map((e) => ({ keys: e.keys.split(',').map((k) => k.trim()).filter(Boolean), content: e.content.trim() }))
     .filter((e) => e.keys.length && e.content);
   if (!Object.keys(changed).length && !lorebookEntries.length) {
-    msg.textContent = 'Nothing has changed yet — edit something, or Cancel.';
+    msg.textContent = editor.source === 'improve'
+      ? 'Nothing is allowed yet — allow at least one change (or add a lorebook entry, or edit the text), or Cancel.'
+      : 'Nothing has changed yet — edit something, or Cancel.';
     return;
   }
+  // A lorebook move whose two halves disagree would lose or double text.
+  const loreProblem = els.modalBody.querySelector('[data-lore-check] .editor-warning');
+  if (loreProblem && !confirm(`${loreProblem.textContent.replace('⚠ ', '')}\n\nSave anyway?`)) return;
   if (mode === 'replace' && !confirm(
     `Overwrite "${editor.name}" with this version?\n\n` +
     `${Object.keys(changed).length} field(s) change${lorebookEntries.length ? `, ${lorebookEntries.length} lorebook entr${lorebookEntries.length === 1 ? 'y is' : 'ies are'} added` : ''}. A copy of the current file is kept in Trash, so this is undoable.`,
@@ -1886,7 +2055,8 @@ async function runRewrite() {
       headline: data.headline,
       previousScore: data.previousScore,
       rows: rowsFromProposal(data),
-      lorebook: (data.lorebookEntries || []).map((e) => ({ keys: e.keys.join(', '), content: e.content })),
+      // Like every other change, a lorebook entry is only added once you allow it.
+      lorebook: (data.lorebookEntries || []).map((e) => ({ keys: e.keys.join(', '), content: e.content, include: false })),
       lostQuotes: data.lostQuotes || [],
       keepQuotes: st.keepQuotes,
     };
