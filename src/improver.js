@@ -142,16 +142,17 @@ function allCardText(card) {
 }
 
 /**
- * Context the ideas step needs for the spec checks: creator_notes (which never
- * reach the model, so the model can't otherwise see what's in them), what the
- * lorebook already holds, and whether one can be added to at all.
+ * Context the ideas step needs: what the lorebook already holds (so it doesn't
+ * suggest duplicates) and whether one can be added to at all.
+ *
+ * creator_notes are deliberately NOT sent. They are the creator's notes to the
+ * reader — the profile blurb, credits, links — not part of the character, and
+ * the model never sees them in a chat. Judging or improving a card on them
+ * would be judging something that isn't the card.
  */
 function cardContext(card) {
   const data = card.raw?.data || card.raw || {};
   const lines = [];
-  if (typeof data.creator_notes === 'string' && data.creator_notes.trim()) {
-    lines.push('creator_notes (shown to users, never sent to the model):', data.creator_notes.trim().slice(0, 1500), '');
-  }
   const entries = data.character_book?.entries;
   if (Array.isArray(entries) && entries.length) {
     const keys = entries.slice(0, 20).map((e) => (Array.isArray(e.keys) ? e.keys.slice(0, 3).join('/') : '?')).join(', ');

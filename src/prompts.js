@@ -118,8 +118,8 @@ never invents new backstory, powers, relatives or plot.
 Also check the card against the Character Card V2 spec and SillyTavern practice:
 - system_prompt and post_history_instructions REPLACE the user's own system prompt and jailbreak unless they \
 contain {{original}}. If either is set without {{original}}, suggest adding it, unless the override is clearly intended.
-- creator_notes are never sent to the model. Character facts or instructions placed there have no effect; \
-credits, links or usage notes placed in description or other prompt fields waste tokens and confuse the model.
+- Credits, links, update notes or usage instructions aimed at the reader are not part of the character. Placed \
+in description or another prompt field, they waste tokens and confuse the model; suggest removing them.
 - alternate_greetings are swipes for the first message: each should be a distinct, complete opening, not a \
 near-copy of first_mes.
 - Use {{char}} and {{user}} rather than hard-coded names where the card means the character or the user.

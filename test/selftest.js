@@ -1445,12 +1445,26 @@ async function testIdeasThenRewrite() {
     },
   };
   const ideas = await generateIdeas(parsed, null, ideasProvider);
-  assert.ok(seenIdeasPrompt.includes('creator_notes (shown to users, never sent to the model)'), 'the model must see creator_notes to judge them');
-  assert.ok(seenIdeasPrompt.includes('Existing lorebook: 1 entry'), 'and what the lorebook already holds');
+  assert.ok(!seenIdeasPrompt.includes('Made by Anon'), 'creator notes are not the card and must not be sent');
+  assert.ok(seenIdeasPrompt.includes('Existing lorebook: 1 entry'), 'the model is told what the lorebook already holds');
   assert.equal(ideas.ideas.length, 2, 'ideas for fields the card does not have are dropped');
   assert.equal(ideas.ideas[0].impact, 'high');
   assert.deepEqual(ideas.keepQuotes, ['Storm\'s coming, {{user}}.'], 'a "quote" that is not really in the card is dropped — it could not be protected');
-  console.log('✓ ideas are checked against the card: unknown fields dropped, misquotes dropped, creator_notes and lorebook shown to the model');
+  console.log('✓ ideas are checked against the card: unknown fields dropped, misquotes dropped; existing lorebook shown, creator notes not');
+
+  // Creator notes are the creator's profile blurb, credits and links — not the
+  // character. No prompt may include them: not scoring, not either improve step.
+  const { buildScoringPrompts } = await import('../src/scorer.js');
+  const { buildIdeasPrompts, buildImprovePrompts } = await import('../src/improver.js');
+  const everyPrompt = [
+    buildScoringPrompts(parsed, undefined, { detail: 'full' }),
+    buildScoringPrompts(parsed, undefined, { detail: 'fast' }),
+    buildIdeasPrompts(parsed, null),
+    buildImprovePrompts(parsed, null),
+  ];
+  assert.ok(everyPrompt.every((p) => !(p.system + p.user).includes('Made by Anon')),
+    'creator notes must never reach the model, for scoring or improving');
+  console.log('✓ creator notes are never sent — not for full or fast scoring, not for ideas, not for the rewrite');
 
   const v1 = extractCardFromPng(buildFakePng({ name: 'Flat', description: 'x '.repeat(80), first_mes: 'hi' }));
   const v1ideas = await generateIdeas(v1, null, { name: 's', model: 's', async chat() {

@@ -192,7 +192,7 @@ The ideas also check the card against the
 | | |
 |---|---|
 | `system_prompt` / `post_history_instructions` | These **replace** your own system prompt and jailbreak unless they contain `{{original}}`. A card that sets one without it is flagged. |
-| `creator_notes` | Never sent to the model. Facts or instructions placed there do nothing; credits and usage notes placed in the description waste tokens. |
+| **Reader notes in the card** | Credits, links, update notes or usage instructions placed in the description or another prompt field aren't part of the character — they waste tokens and confuse the model. |
 | `alternate_greetings` | Swipes for the first message — each should be a distinct, complete opening, not a near-copy. |
 | `{{char}}` / `{{user}}` | Hard-coded names where the card means the character or the user. |
 | **Lorebook moves** | Background that only matters in some scenes can move out of an always-sent field into **lorebook entries**, which SillyTavern only sends when a keyword comes up. Nothing is deleted, and every turn costs fewer tokens. |
@@ -223,6 +223,11 @@ Checked in code, not just asked for in the prompt:
 | **Keep the macros** | If the original used `{{user}}` or `{{char}}` and the rewrite has none left, you're warned. Dropping a *repeated* macro is fine editing. |
 | **Protected lines** | Any exact line from the keep list that disappears is flagged, live. |
 | **Only what you chose** | Unchosen fields are never sent, and rewrites of them are discarded. |
+
+**Creator notes are never judged.** They're the creator's profile blurb, credits and
+links — not the character, and never part of a chat. They aren't sent for scoring (full
+or fast) or for either improve step, so they can't raise or lower a score or shape a
+suggestion.
 
 Everything else in the card — lorebook, creator notes, tags, `extensions`, the artwork —
 is copied through byte-for-byte. Both steps' prompts are editable in **Prompts**
