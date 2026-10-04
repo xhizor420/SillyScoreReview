@@ -437,6 +437,7 @@ async function main() {
   await testIdeasThenRewrite();
   await testChangePicker();
   await testWriterNoteAndFlatCopy();
+  await testCreatorNotesNeverSent();
   await testCardEditsReview();
   await testTwoPassAndRawReplies();
 
@@ -1583,6 +1584,45 @@ async function testIdeasThenRewrite() {
   assert.equal(proposal.lorebookEntries, undefined, 'no lorebook entries come back');
   assert.ok(proposal.rest.includes('Dry, watchful.') && !proposal.rest.includes(OLD_LOOK), 'the rest of the card (card only) comes back for the detail check');
   console.log('✓ the edits stay inside the chosen ideas and the card: the greeting fix goes through; the description, an unchosen field and the lorebook are refused');
+}
+
+/**
+ * Creator notes are the creator's words to the reader — profile blurb,
+ * credits, links, update logs — not the character, and never part of a chat.
+ * Cards keep them in several places (V2 data.creator_notes, the flat V1 copy,
+ * SillyTavern's "creatorcomment"). Not one of them, nor the creator's name or
+ * the card version, may reach the model in any prompt: scoring, ideas or edits.
+ */
+async function testCreatorNotesNeverSent() {
+  const { extractCardFromJson } = await import('../src/cardParser.js');
+  const { buildScoringPrompts } = await import('../src/scorer.js');
+  const { buildIdeasPrompts, buildImprovePrompts, editTargets } = await import('../src/improver.js');
+  const raw = {
+    name: 'Wren', description: 'Wren keeps a lighthouse.', first_mes: 'Hi {{user}}.',
+    creator_notes: 'NOTES-FLAT', creatorcomment: 'NOTES-ST', creator: 'NAME-X',
+    spec: 'chara_card_v2', spec_version: '2.0',
+    data: {
+      name: 'Wren', description: 'Wren keeps a lighthouse.', personality: 'Dry.', first_mes: 'Hi {{user}}.',
+      creator_notes: 'NOTES-V2: thanks for downloading! Links and update log here.', creator: 'NAME-X', character_version: 'VERSION-X',
+      extensions: { depth_prompt: { depth: 4, prompt: 'Third person.', role: 'system' } },
+    },
+  };
+  const card = extractCardFromJson(Buffer.from(JSON.stringify(raw)));
+  const targets = [...editTargets(card).values()];
+  assert.ok(!targets.some((t) => /creator/i.test(t.target)), 'creator notes are never something Improve can edit');
+  const plan = { ideas: targets.map((t, i) => ({ id: `i${i}`, kind: 'extend', field: t.target, title: 't', change: 'c', quotes: [] })), canon: [], keepQuotes: [] };
+  const all = [
+    buildScoringPrompts(card, undefined, { detail: 'fast' }),
+    buildScoringPrompts(card, undefined, { detail: 'full' }),
+    buildIdeasPrompts(card, null),
+    buildImprovePrompts(card, null, { plan }),
+    buildImprovePrompts(card, null),
+  ].map((p) => p.system + p.user);
+  for (const mark of ['NOTES-V2', 'NOTES-FLAT', 'NOTES-ST', 'NAME-X', 'VERSION-X']) {
+    assert.ok(all.every((t) => !t.includes(mark)), `${mark} must never be sent`);
+  }
+  assert.ok(all.every((t) => t.includes('Third person.')), "the Character's Note (part of how the card plays) is sent");
+  console.log('✓ creator notes (V2, flat copy, SillyTavern creatorcomment), creator name and version are never sent — in any scoring, ideas or edit prompt');
 }
 
 /** Saving edits: the Character's Note, and the flat copy SillyTavern's JSON exports carry. */
