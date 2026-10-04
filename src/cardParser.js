@@ -12,7 +12,20 @@ export const SCORABLE_FIELDS = [
   'mes_example',
   'system_prompt',
   'post_history_instructions',
+  // SillyTavern's Character's Note (extensions.depth_prompt): an instruction
+  // injected into the chat every few messages. Often where a card sets its
+  // style, length and point of view — a review that can't see it misjudges
+  // the card.
+  'character_note',
   'alternate_greetings',
+];
+
+// The fields a card's content hash covers. Fixed at the original set, so that
+// adding a field to what is reviewed never makes every scored card in a
+// library look edited (and due for a rescan).
+const HASHED_FIELDS = [
+  'description', 'personality', 'scenario', 'first_mes', 'mes_example',
+  'system_prompt', 'post_history_instructions', 'alternate_greetings',
 ];
 
 /**
@@ -111,6 +124,7 @@ function normalizeCardData(raw) {
       mes_example: data.mes_example || '',
       system_prompt: data.system_prompt || '',
       post_history_instructions: data.post_history_instructions || '',
+      character_note: typeof data.extensions?.depth_prompt?.prompt === 'string' ? data.extensions.depth_prompt.prompt : '',
       alternate_greetings: alternateGreetings,
     },
   };
@@ -162,6 +176,6 @@ export function totalCardTokens(card) {
 export function hashCard(card) {
   const h = createHash('sha256');
   h.update(card.name);
-  for (const f of SCORABLE_FIELDS) h.update('\0' + (card.fields[f] || ''));
+  for (const f of HASHED_FIELDS) h.update('\0' + (card.fields[f] || ''));
   return h.digest('hex');
 }

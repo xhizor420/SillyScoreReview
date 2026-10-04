@@ -137,8 +137,8 @@ scores instead of demanding a rescan.
 |---|---|
 | **Full critique** | the **Full critique** buttons and *Rescore with full critique* — your original rubric |
 | **Fast scoring** | the **Fast score** buttons |
-| **Improvement ideas** | step 2 of *Improve with AI* — the keep list and the menu of changes |
-| **Improve card** | step 3 of *Improve with AI* — the rewrite of the changes you chose |
+| **Improvement ideas** | step 2 of *Improve with AI* — the canon and the menu of changes |
+| **Improve card** | step 3 of *Improve with AI* — the changes you chose, as precise edits |
 
 Each prompt has two parts. **Your instructions** are fully editable — a different
 rubric, stricter or kinder grading, a genre focus ("judge these as horror cards"),
@@ -173,86 +173,130 @@ built-in prompt back. Edits are saved to `config.json` under `prompts`.
 
 ## Improving a card
 
-Scoring tells you a card is a 4/10. **Improve with AI**, on the card itself, does
-something about it — in two steps, so you decide what changes and the card keeps its
-feel.
+Scoring tells you a card is a 4/10 — or that a deep, much-loved card has a few things
+holding it back. **Improve with AI**, on the card itself, does something about it, built
+around one rule: **the character stays the character**. Its look, voice, goals and
+everything else that makes it itself are kept; what changes is what you choose, and only
+where you choose it.
 
 **1 · Rating.** Each step feeds the next: the full critique → ideas aimed at what it found
-→ a rewrite of only the ideas you tick. If the card has only a fast score (or none),
-Improve writes the full critique first, saves it to the card, then goes on — so it is
-never spent twice, and the ideas are never guessed from the text alone.
+→ edits for the ideas you tick. If the card has only a fast score (or none), Improve
+writes the full critique first, saves it to the card, then goes on — so it is never spent
+twice, and the ideas are never guessed from the text alone.
 
-**2 · Choose ideas.** The model reads the card and its critique and comes back with:
+**2 · Choose ideas.** The model reads the card, its critique, its Character's Note and its
+lorebook, and comes back with:
 
-- **What makes this card itself** — its voice, quirks, formatting, signature lines, canon
-  facts. This list is editable: add anything you want protected, remove anything you're
-  happy to change. It is sent with the rewrite as a set of hard rules.
-- **Exact lines that must survive word for word** — a few of the card's own phrases.
-  After the rewrite, the dashboard checks they're all still there (and warns you, live,
-  if one goes missing). A "quote" the model got wrong is dropped, since a line that isn't
-  really in the card can't be protected.
-- **A menu of specific changes**, each with the field it touches, what it fixes, how much
-  it matters, and — plainly — how it could change the card's feel. High- and
-  medium-impact ideas with no such risk come pre-ticked; anything risky or minor is yours
-  to opt into.
+- **The canon — what makes this card itself**, grouped by *look, personality, voice,
+  goals, relationships, powers, setting, format*. Each fact comes with a short quote from
+  the card that establishes it (a quote the model got wrong is dropped — a line that isn't
+  really in the card can't be protected). The **description is the reference**: where the
+  greeting or the lorebook disagrees with it, the description's version is canon. Untick
+  anything you're happy to see changed, and add anything else you want kept ("her outfit
+  stays exactly as described"). The canon goes with every change as a hard rule, and its
+  quoted lines are checked word for word in the review.
+- **A menu of specific changes, each of a stated kind:**
 
-The ideas also check the card against the
-[Character Card V2 spec](https://github.com/malfoyslastname/character-card-spec-v2):
-
-| | |
+| kind | what it does |
 |---|---|
-| `system_prompt` / `post_history_instructions` | These **replace** your own system prompt and jailbreak unless they contain `{{original}}`. A card that sets one without it is flagged. |
-| **Reader notes in the card** | Credits, links, update notes or usage instructions placed in the description or another prompt field aren't part of the character — they waste tokens and confuse the model. |
-| `alternate_greetings` | Swipes for the first message — each should be a distinct, complete opening, not a near-copy. |
-| `{{char}}` / `{{user}}` | Hard-coded names where the card means the character or the user. |
-| **Lorebook moves** | Background that only matters in some scenes can move out of an always-sent field into **lorebook entries**, which SillyTavern only sends when a keyword comes up. Nothing is deleted, and every turn costs fewer tokens. |
+| **Fix** | A contradiction or error — the greeting says 8 feet, the description says 7'0". The part that disagrees changes to match the canon. |
+| **Combine** | Details about one thing are scattered or said twice; they're merged into one stronger passage that keeps every detail from each. |
+| **Extend** | A thin spot where a little more helps the model play the character — a behaviour, a sensory detail, a reaction, a line in their voice. Built only on what the card already says: no new backstory, powers or plot. |
+| **Move** | Scene-specific detail moves from an always-sent field into a new **lorebook entry** (sent only when a keyword comes up). Nothing is lost. |
+| **Lorebook** | Fixes an existing entry: merges duplicates into one and **switches the others off** (never deletes), updates an entry that still describes an older version of the character, flags a mislabelled one. |
+| **Trim** | Only true repetition or reader-facing text (credits, links, update notes). **Never pre-ticked** — removing things is always your call. |
 
-**3 · Compare and allow.** Only the fields your ticked ideas touch are sent to the model
-at all — and if it rewrites anything else anyway, that is thrown away. What comes back is
-**a set of suggestions, not changes**: nothing is applied until you allow it.
+  Each idea shows the passages it's about, what it fixes, how much it matters, and —
+  plainly — how it could change the card's feel. Fixes, combines, extensions and lorebook
+  fixes with no such risk come pre-ticked.
 
-- Each field is broken into its **individual changes, original next to suggestion**, with
-  the differing words marked. A rewrite that trims the body description, trims the outfit
-  and deletes a filler line is **three separate choices** — keep the original outfit and
-  allow the other two. Each change has **Keep original** / **Allow change**; every field has
-  *Allow all* and *Keep all original*.
-- Below the changes is the **final text** — exactly what will be saved, updating as you
-  allow things. Edit it however you like. Once you type in it, that field's buttons pause
-  (they'd overwrite your edit) until you choose *Discard my edits and go back to the choices*.
-- **Lorebook entries** are suggestions too — tick *Add this lorebook entry* to include one,
-  and edit its keywords or text. Because a lorebook move is two halves (text leaves the
-  field, an entry holds it), you're warned if they disagree: text moved out with no entry
-  would be **lost**; an entry added while the text is still in the field would be **sent
-  twice**.
-- Live checks on the final text: a field that got longer, a lost `{{user}}`/`{{char}}`,
-  or one of your protected lines going missing.
+**3 · Review changes.** The ideas you tick come back as **precise edits to the card's own
+text — never a rewrite of whole fields.** Each edit quotes one exact passage ("replace
+this sentence with…", "add this after that line…", "switch this lorebook entry off"), so
+**everything outside an edit stays word for word**. The model can't quietly summarise a
+3,000-token description and drop the outfit, because it never hands back the description
+— only the passages it's changing.
+
+- Each change is shown **in place**: *Card now* beside *With this change*, with the
+  surrounding text and the changed words marked. Use it, leave it off, or **adjust** its
+  new text in its own box.
+- Every change is **checked for what it would remove**, live, against the whole card as it
+  would be saved: *✓ Keeps every detail*, *✓ Adds only*, *Corrects: "8 feet"* (a fix, on
+  purpose) — or *⚠ Would remove details found nowhere else in the card: "oilskin",
+  "brass", "scarf"*. **A change that would lose a detail starts off**; everything else
+  starts on. A detail that merely moved — into a merged passage, or a new lorebook entry —
+  is still in the card, so it isn't flagged.
+- Switching off a duplicate lorebook entry is checked the same way: if it held something
+  the kept entry doesn't, you're told what, and it starts off.
+- **Compare the whole field side by side** for the full picture, and **edit the final text
+  by hand** if you want (the switches pause while you do, so they can't overwrite you).
+- A change whose quote isn't in the card (or is there twice) is **never guessed at** —
+  it's listed as couldn't-be-placed, with its text, so you can copy it in by hand.
+- Also checked live: a protected canon line going missing, a lost `{{user}}`/`{{char}}`,
+  and lorebook moves whose two halves disagree.
 
 Save it as a **new card file** — `Name (improved).png`, the default, with your original
-PNG untouched and keeping its score — or **replace the original** (a copy of the pre-edit
-file goes to Trash). Leave *Score it
-after saving* ticked to see the before/after straight away: **5.1 → 8.2 (+3.1)**.
+untouched and keeping its score — or **replace the original** (a copy of the pre-edit file
+goes to Trash). Leave *Score it after saving* ticked to see the before/after straight
+away: **5.1 → 8.2 (+3.1)**.
 
 Because the improved card keeps the character's name, it lands in the same duplicate
 group as its parent — so after it scores higher, **Select all but the best of each**
 picks the old one for deletion.
 
-Checked in code, not just asked for in the prompt:
+The ideas also check the card against the
+[Character Card V2 spec](https://github.com/malfoyslastname/character-card-spec-v2) and
+SillyTavern practice: `system_prompt` / `post_history_instructions` without `{{original}}`
+(they replace your own prompt), `alternate_greetings` that are near-copies of the first
+message, hard-coded names where `{{char}}`/`{{user}}` was meant, and greetings that speak
+or act for `{{user}}`.
 
-| | |
-|---|---|
-| **No padding** | A rewritten field that grew is flagged. A longer card is a worse card. |
-| **Keep the macros** | If the original used `{{user}}` or `{{char}}` and the rewrite has none left, you're warned. Dropping a *repeated* macro is fine editing. |
-| **Protected lines** | Any exact line from the keep list that disappears is flagged, live. |
-| **Only what you chose** | Unchosen fields are never sent, and rewrites of them are discarded. |
+### The review sees the whole card
+
+- **Character's Note** (SillyTavern's `extensions.depth_prompt`) is read, scored and
+  editable like any field — it's often where a card sets its style, length and point of
+  view, and a review that can't see it misjudges the card. Its depth and role are kept
+  when it's saved.
+- **The lorebook** goes to the full critique as context (not scored): entries the model
+  sees every turn are part of the character as played, and an entry still describing an
+  older look is exactly the contradiction a critique should catch.
+- **Depth, not length.** The critique credits specific, usable detail however much there
+  is; the faults are repetition, filler, generic phrasing, traits told but never shown,
+  and contradictions between parts of the card. Its suggestions are written to keep the
+  character: fix, combine, extend — never cut a distinctive detail.
+
+### Lorebook health
+
+Opening a card shows a **Lorebook** section, measured in code (not the model's opinion):
+
+- **Near-duplicate entries** — lorebooks grown from chat memories collect three copies of
+  "Physical Appearance", each slightly different, and an old copy keeps telling the model
+  a look the card has since moved on from.
+- **Entries keyed on the character's own name** — her name comes up in almost every
+  message, so those entries are effectively always on. You see how many tokens that adds
+  to nearly every message.
+- **Very common keys** ("magic", "plan", "location") that fire far more often than the
+  entry is relevant.
+- **Mislabelled entries** — an entry titled "Rainbow Dash" whose keys and text are all
+  about Rarity.
+
+Improve with AI sees these findings and can propose the fixes.
 
 **Creator notes are never judged.** They're the creator's profile blurb, credits and
 links — not the character, and never part of a chat. They aren't sent for scoring (full
 or fast) or for either improve step, so they can't raise or lower a score or shape a
 suggestion.
 
-Everything else in the card — lorebook, creator notes, tags, `extensions`, the artwork —
-is copied through byte-for-byte. Both steps' prompts are editable in **Prompts**
-(*Improvement ideas* and *Improve card*).
+Everything else in the card — creator notes, tags, `extensions`, the artwork, every
+lorebook entry you didn't change — is copied through byte-for-byte, and the flat copy of
+the fields that SillyTavern's JSON exports carry at the top level is kept in step. Both
+steps' prompts are editable in **Prompts** (*Improvement ideas* and *Improve card*).
+
+**After updating:** the default prompts changed (depth not length, consistency across the
+card), so scores made with the old defaults show as **older prompt**. Nothing is rescored
+by itself — filter *Scored with an older prompt* and rescore what you want. If you pasted
+your own prompt into Prompts, yours is kept; press **Reset to default** on a tab to try the
+new one.
 
 ## Editing a card by hand
 
@@ -423,7 +467,7 @@ The same two buttons appear in the selection bar for hand-picked cards.
 3. **Full critique** — now only the keepers are left without one, so that's all it
    spends requests on. Press it again later and it does nothing — everything has one.
 4. **Improve with AI** on the cards worth it — the critique feeds the ideas, the ideas
-   you tick feed the rewrite.
+   you tick feed the edits.
 
 The **Fast-scored (no critique yet)** filter shows what step 3 will do. Opening one card
 and pressing **Rescore with full critique** does the same for just that card.

@@ -326,25 +326,30 @@ function createOpenAICompatProvider(config, name = 'openai-compatible') {
 }
 
 /**
- * Splits an improve prompt back into its per-field original text, so the mock
- * provider can return a plausible edit of the real card instead of lorem ipsum.
+ * Splits an ideas/improve prompt back into the text of each part it shows
+ * ("### description", "### lorebook:3 — …"), so the mock provider can return
+ * plausible ideas and edits for the real card instead of lorem ipsum.
  */
-function parseImprovePromptFields(user) {
+function parsePromptParts(user) {
   const out = {};
-  const parts = user.split(/^### (\w+)[^\n]*$/m);
-  for (let i = 1; i < parts.length; i += 2) {
-    const field = parts[i];
-    const body = (parts[i + 1] || '')
+  const parts = user.split(/^### ([\w:]+)([^\n]*)$/m);
+  for (let i = 1; i < parts.length; i += 3) {
+    const name = parts[i];
+    if (/^Lorebook$/i.test(name) || /REFERENCE ONLY/.test(parts[i + 1] || '')) continue;
+    const body = (parts[i + 2] || '')
       .split('\n')
-      .filter((line) => !line.startsWith('Critique of this field:') && !line.startsWith('Rating of this field:'))
-      .join('\n')
-      .trim();
-    // Drop the trailing instruction paragraph that follows the last field.
-    let cut = body.indexOf('\nRewrite only the fields');
-    if (cut === -1) cut = body.indexOf('\nFields you may suggest');
-    out[field] = (cut === -1 ? body : body.slice(0, cut)).trim();
+      .filter((line) => !/^(Critique|Rating) of this field:/.test(line))
+      .join('\n');
+    const cut = body.search(/\n(You may edit only:|Fields you may suggest|This card )/);
+    out[name] = (cut === -1 ? body : body.slice(0, cut)).trim();
   }
   return out;
+}
+
+/** The first whole sentence of `text` (or its first line), for quoting. */
+function firstSentence(text) {
+  const m = text.match(/^[^\n]*?[.!?](?=\s|$)/);
+  return (m ? m[0] : text.split('\n')[0]).trim();
 }
 
 /** Deterministic offline provider for --dry-run / self-tests. No network calls, no cost. */
@@ -353,14 +358,11 @@ function createMockProvider() {
     name: 'mock',
     model: 'mock-heuristic',
     async chat({ system, user }) {
-      // An improve request wants rewritten card text back, not scores. Return a
-      // deterministic *tightened* edit — shorter than the original, macros kept
-      // — so the offline path exercises the real review/save flow.
       // Fast triage asks for bare numbers; answer in that shape so the offline
       // path exercises the same parser a real fast scan does.
       if (/Output nothing else — no strengths/.test(system || '')) {
         const fields = {};
-        for (const m of user.matchAll(/### (\w+)/g)) fields[m[1]] = 6;
+        for (const m of user.matchAll(/### (\w+)/g)) if (m[1] !== 'Lorebook') fields[m[1]] = 6;
         const scores = Object.values(fields);
         return JSON.stringify({
           fields,
@@ -371,53 +373,62 @@ function createMockProvider() {
       // Recognised by its locked response format, not its wording — the
       // instructions part is user-editable and may say anything.
       // Ideas step: a deterministic menu built from the real card, so the
-      // offline path exercises the same choose-then-rewrite flow.
-      if (/"keep_quotes": \["<a short phrase copied exactly from the card>"\]/.test(system || '')) {
-        const originals = parseImprovePromptFields(user);
-        const lorebookOk = /lorebook ideas are allowed/.test(user);
+      // offline path exercises the same choose-then-edit flow.
+      if (/"canon": \[/.test(system || '') && /"ideas": \[/.test(system || '')) {
+        const originals = parsePromptParts(user);
+        const lorebookOk = /This card has a lorebook|has none yet: "move"/.test(user);
         const ideas = [];
-        let quote = null;
+        const canon = [];
         for (const [field, text] of Object.entries(originals)) {
-          if (!text) continue;
-          if (!quote && field === 'first_mes') quote = text.split(/\s+/).slice(0, 4).join(' ');
+          if (!text || field.startsWith('lorebook:')) continue;
+          const quote = firstSentence(text);
+          if (canon.length < 4 && quote) canon.push({ aspect: field === 'first_mes' ? 'voice' : 'personality', fact: `Mock provider: how ${field.replace(/_/g, ' ')} opens`, quote });
           ideas.push({
-            field, title: `Tighten the ${field.replace(/_/g, ' ')}`, change: `Cut repeated phrasing in ${field}.`,
-            why: 'Mock provider: no real analysis.', impact: ideas.length ? 'medium' : 'high', risk: 'none', lorebook: false,
+            kind: 'extend', field, title: `Show the ${field.replace(/_/g, ' ')} in action`,
+            change: `Add one concrete behaviour after the first sentence of ${field}.`, why: 'Mock provider: no real analysis.',
+            quotes: quote ? [quote] : [], impact: ideas.length ? 'medium' : 'high', risk: 'none',
           });
           if (lorebookOk && field === 'description' && text.split(/\s+/).length > 40) {
             ideas.push({
-              field, title: 'Move background into the lorebook', change: 'Move the second half of the description into a lorebook entry.',
-              why: 'Mock provider: long always-on background.', impact: 'medium', risk: 'Background only appears when its keyword comes up.', lorebook: true,
+              kind: 'move', field, title: 'Move background into the lorebook', change: 'Move the last sentence of the description into a lorebook entry.',
+              why: 'Mock provider: long always-on background.', quotes: [], impact: 'medium', risk: 'Background only appears when its keyword comes up.',
             });
           }
         }
-        return JSON.stringify({ keep: ['Mock provider: the card\'s voice'], keep_quotes: quote ? [quote] : [], ideas });
+        return JSON.stringify({ canon, ideas });
       }
 
-      if (/"headline": "<one sentence on the overall change>"/.test(system || '')) {
-        const originals = parseImprovePromptFields(user);
-        const moveToLorebook = /Move this detail into new lorebook entries/.test(user);
-        const fields = {};
+      if (/"edits": \[/.test(system || '') && /"headline"/.test(system || '')) {
+        const originals = parsePromptParts(user);
+        const chosen = [...user.matchAll(/^(\d+)\. \[(\w+) · ([\w:]+)\]/gm)].map((m) => ({ n: Number(m[1]), kind: m[2], field: m[3] }));
+        const edits = [];
         const entries = [];
-        for (const [field, text] of Object.entries(originals)) {
+        for (const c of chosen.length ? chosen : Object.keys(originals).map((field, i) => ({ n: i + 1, kind: 'extend', field }))) {
+          const text = originals[c.field];
           if (!text) continue;
-          const words = text.split(/\s+/);
-          if (moveToLorebook && field === 'description' && words.length > 40) {
-            const half = Math.ceil(words.length / 2);
-            fields[field] = { text: words.slice(0, half).join(' '), why: 'Mock provider: moved background to the lorebook.' };
-            entries.push({ keys: [words.find((w) => w.length > 4) || 'background'], content: words.slice(half).join(' ') });
+          if (c.kind === 'move') {
+            const sentences = text.match(/[^.!?]+[.!?]+(\s|$)/g) || [];
+            const last = (sentences[sentences.length - 1] || '').trim();
+            if (last && sentences.length > 1) {
+              edits.push({ idea: c.n, field: c.field, action: 'replace', find: last, text: '', why: 'Mock provider: moved to the lorebook.' });
+              entries.push({ keys: [last.split(/\s+/).find((w) => w.length > 4) || 'background'], content: last });
+            }
             continue;
           }
-          const kept = words.slice(0, Math.max(3, Math.ceil(words.length * 0.8))).join(' ');
-          fields[field] = { text: kept, why: 'Mock provider: trimmed filler, no real editing performed.' };
+          const anchor = firstSentence(text);
+          if (!anchor) continue;
+          edits.push({
+            idea: c.n, field: c.field, action: 'insert_after', find: anchor,
+            text: ' {{char}} pauses, choosing the next words with care.', why: 'Mock provider: a placeholder behaviour.',
+          });
         }
-        return JSON.stringify({ fields, new_lorebook_entries: entries, headline: 'Mock provider edit — use a real provider for actual rewrites.' });
+        return JSON.stringify({ edits, new_lorebook_entries: entries, headline: 'Mock provider edits — use a real provider for actual improvements.' });
       }
 
       // crude heuristic: score inversely correlated with filler/repetition, just for pipeline testing
       const lengthPenalty = Math.min(3, Math.max(0, (user.length - 3000) / 4000));
       const base = 7 - lengthPenalty;
-      const fieldsMatch = [...user.matchAll(/### (\w+)/g)].map((m) => m[1]);
+      const fieldsMatch = [...user.matchAll(/### (\w+)/g)].map((m) => m[1]).filter((f) => f !== 'Lorebook');
       const fields = {};
       for (const f of fieldsMatch) {
         const score = Math.max(1, Math.min(10, Math.round(base + (Math.random() * 2 - 1))));

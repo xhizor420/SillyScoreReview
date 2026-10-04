@@ -704,6 +704,29 @@ function renderSelectionBar() {
   els.critiqueSelectedBtn.textContent = n ? `Full critique (${n})` : 'Full critique';
 }
 
+/**
+ * The lorebook's health, measured in code (not the model's opinion):
+ * duplicates, entries that are effectively always on, mislabelled entries.
+ * Open when there is something worth fixing.
+ */
+function lorebookHealthHtml(lb) {
+  if (!lb?.count) return '';
+  const title = (i) => lb.titles.find((t) => t.index === i)?.title || `Entry ${i + 1}`;
+  const warn = lb.findings.filter((f) => f.severity === 'warn');
+  return `<details class="lore-health" ${warn.length ? 'open' : ''}>
+    <summary>Lorebook — ${lb.count} entr${lb.count === 1 ? 'y' : 'ies'}${lb.findings.length ? ` · ${warn.length ? `${warn.length} problem${warn.length === 1 ? '' : 's'}` : 'notes'}` : ' · no problems found'}</summary>
+    ${lb.alwaysOnCount ? `<p class="folder-hint">${lb.alwaysOnCount} entr${lb.alwaysOnCount === 1 ? 'y is' : 'ies are'} effectively always on — about
+      <b>${lb.alwaysOnTokens.toLocaleString()} tokens</b> added to nearly every message.</p>` : ''}
+    ${lb.findings.map((f) => `<div class="lore-finding sev-${f.severity}">
+      <div>${f.severity === 'warn' ? '⚠ ' : ''}${escapeHtml(f.message)}</div>
+      ${f.kind !== 'name-key' && f.kind !== 'generic-key' && f.entries.length <= 6
+        ? `<div class="dim">${f.entries.map((i) => `#${i} ${escapeHtml(title(i))}`).join(' · ')}</div>` : ''}
+    </div>`).join('')}
+    <p class="folder-hint">Improve with AI sees these and can propose fixes — merging duplicates into one entry and switching the
+      others off (never deleting), or updating an entry that contradicts the card.</p>
+  </details>`;
+}
+
 async function openCard(id) {
   const data = await api(`/api/cards/${encodeURIComponent(id)}`);
   const entry = data.entry;
@@ -714,8 +737,8 @@ async function openCard(id) {
   html += `<div class="modal-actions">
     <button data-action="score">${briefOnly ? 'Rescore with full critique' : result ? 'Rescore' : 'Score this card'}</button>
     <button data-action="improve" title="${result && !result.partial && !briefOnly
-      ? 'Ideas aimed at this card\'s critique, then a rewrite of only the ones you tick. You compare and pick before anything is saved.'
-      : 'Writes the full critique first, then ideas aimed at it, then a rewrite of only the ones you tick. You compare and pick before anything is saved.'}">Improve with AI</button>
+      ? 'Ideas aimed at this card\'s critique, then precise edits for the ones you tick — each shown in place, side by side, before anything is saved.'
+      : 'Writes the full critique first, then ideas aimed at it, then precise edits for the ones you tick — each shown in place, side by side, before anything is saved.'}">Improve with AI</button>
     <button data-action="edit" class="secondary">Edit text</button>
     <button data-action="delete" class="danger">Delete</button>
   </div>`;
@@ -748,7 +771,7 @@ async function openCard(id) {
     for (const [field, f] of Object.entries(result.fields)) {
       const hasCritique = f.strengths || f.weaknesses || f.suggestions;
       html += `<div class="field-block">
-        <div class="field-title"><span>${escapeHtml(field.replace(/_/g, ' '))}</span><span class="field-score">${f.score ?? '–'}/10</span></div>
+        <div class="field-title"><span>${escapeHtml(fieldLabel(field))}</span><span class="field-score">${f.score ?? '–'}/10</span></div>
         ${hasCritique ? `<div class="field-sub"><b>Strengths:</b> ${escapeHtml(f.strengths || '—')}</div>
         <div class="field-sub"><b>Weaknesses:</b> ${escapeHtml(f.weaknesses || '—')}</div>
         <div class="field-sub"><b>Suggestions:</b> ${escapeHtml(f.suggestions || '—')}</div>` : ''}
@@ -757,6 +780,8 @@ async function openCard(id) {
   } else if (!entry?.error) {
     html += `<p>Not scored yet.</p>`;
   }
+
+  html += lorebookHealthHtml(data.lorebook);
 
   // The card's own text, straight from the PNG. For a score-only entry this is
   // the whole point — without a critique you still need to see what the card
@@ -769,7 +794,7 @@ async function openCard(id) {
       <summary>Card content (${populated.length} field${populated.length === 1 ? '' : 's'})</summary>
       ${populated.map(([name, text]) => `
         <div class="field-block">
-          <div class="field-title"><span>${escapeHtml(name.replace(/_/g, ' '))}</span><span class="field-score">~${Math.ceil(text.length / 4)} tok</span></div>
+          <div class="field-title"><span>${escapeHtml(fieldLabel(name))}</span><span class="field-score">~${Math.ceil(text.length / 4)} tok</span></div>
           <pre class="card-field-text">${escapeHtml(text)}</pre>
         </div>`).join('')}
     </details>`;
@@ -1520,437 +1545,71 @@ els.saveSettingsBtn.addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 // Card editor / AI improvement
 //
-// Scoring a collection is only half the job — the point of finding the best
-// Raven is to then make it better. This is the "improve it" half: the model
-// rewrites the weak fields using its own critique, you review the result field
-// by field (and hand-edit it), and only then does anything touch a file. Saving
-// defaults to a NEW card, so the original is never the thing being gambled.
+// Improve with AI is three steps, each feeding the next:
+//   1. Rating — the full critique (written first if the card only has a fast
+//      score).
+//   2. Choose ideas — the model records the card's canon (what makes it
+//      itself, each fact quoted from the card) and proposes changes of a stated
+//      kind: fix, combine, extend, move, trim, lorebook. You tick what you want.
+//   3. Review changes — the ideas come back as precise edits to the card's own
+//      text, never a rewrite of whole fields. Each is shown in place, card now
+//      beside card after, with a live check for any detail it would remove.
+//      You allow, adjust or refuse each one. Only then does anything touch a
+//      file, and saving defaults to a NEW card.
+//
+// "Edit text" is the same save path without the model: every field in a
+// textarea.
 // ---------------------------------------------------------------------------
 
-let editor = null; // { id, name, source, headline, previousScore, rows: [...] }
+let editor = null;
 
 function tokensOf(text) {
   return Math.ceil((text || '').length / 4);
 }
 
 function fieldLabel(field) {
-  return field.replace(/_/g, ' ');
-}
-
-/** Rows for the "Improve with AI" review: only the fields the model rewrote. */
-function rowsFromProposal(data) {
-  return Object.entries(data.fields).map(([field, f]) => {
-    const before = data.before[field] ?? '';
-    const parts = TextDiff.diffText(before, f.text);
-    return {
-      field,
-      before,
-      proposed: f.text,
-      after: before,
-      parts,
-      // One choice per change, starting on the ORIGINAL: nothing is applied
-      // until you look at it side by side and allow it.
-      choices: parts.filter((p) => p.type === 'change').map(() => 'old'),
-      handEdited: false,
-      why: f.why || '',
-      inflated: f.inflated,
-      lostMacros: f.lostMacros,
-    };
-  });
-}
-
-/** The text a row's current choices produce. */
-function composedText(row) {
-  return TextDiff.compose(row.parts, row.choices, { before: row.before, after: row.proposed });
+  if (field === 'character_note') return 'character\'s note';
+  return String(field).replace(/_/g, ' ');
 }
 
 function highlightWords(tokens, cls) {
   return tokens.map((t) => (t.changed ? `<mark class="${cls}">${escapeHtml(t.text)}</mark>` : escapeHtml(t.text))).join('');
 }
 
-/**
- * One field's suggested rewrite as individual changes, original beside
- * suggestion, each with its own Keep original / Use suggestion choice. Long
- * stretches of unchanged text are folded so the changes stand out.
- */
-function diffHtml(row, i) {
-  let k = 0;
-  return row.parts.map((p) => {
-    if (p.type === 'same') {
-      const t = p.text;
-      if (t.length <= 260) return `<span class="diff-same">${escapeHtml(t)}</span>`;
-      const hidden = t.slice(110, -110);
-      const n = (hidden.match(/\S+/g) || []).length;
-      return `<span class="diff-same">${escapeHtml(t.slice(0, 110))}<button class="diff-fold secondary small" data-unfold="${escapeHtml(encodeURIComponent(hidden))}">… ${n} unchanged words …</button>${escapeHtml(t.slice(-110))}</span>`;
-    }
-    const idx = k++;
-    const choice = row.choices[idx];
-    const w = TextDiff.wordDiff(p.old, p.new);
-    const kind = !p.old.trim() ? 'added' : !p.new.trim() ? 'removed' : 'reworded';
-    return `<div class="hunk is-${choice} ${row.handEdited ? 'is-locked' : ''}" data-hunk="${i}-${idx}">
-      <div class="hunk-sides">
-        <div class="hunk-side hunk-old"><span class="hunk-label">Original</span>${p.old.trim() ? highlightWords(w.old, 'w-del') : '<i class="dim">(nothing here — the suggestion adds this)</i>'}</div>
-        <div class="hunk-side hunk-new"><span class="hunk-label">Suggestion</span>${p.new.trim() ? highlightWords(w.new, 'w-add') : '<i class="dim">(removed)</i>'}</div>
-      </div>
-      <div class="hunk-pick" role="group" aria-label="Change ${idx + 1}: ${kind}">
-        <button class="secondary" data-pick="old" data-row="${i}" data-k="${idx}" aria-pressed="${choice === 'old'}" ${row.handEdited ? 'disabled' : ''}>Keep original</button>
-        <button class="secondary" data-pick="new" data-row="${i}" data-k="${idx}" aria-pressed="${choice === 'new'}" ${row.handEdited ? 'disabled' : ''}>Allow change</button>
-      </div>
-    </div>`;
-  }).join('');
+const KIND_INFO = {
+  fix: { label: 'Fix', hint: 'Corrects a contradiction or error so it matches the canon' },
+  combine: { label: 'Combine', hint: 'Merges scattered or repeated details into one passage that keeps all of them' },
+  extend: { label: 'Extend', hint: 'Adds something concrete for the model to play, built on what the card already says' },
+  move: { label: 'Move', hint: 'Moves scene-specific detail into a lorebook entry — nothing is lost' },
+  trim: { label: 'Trim', hint: 'Removes repetition or reader-facing text — check nothing distinctive goes with it' },
+  lorebook: { label: 'Lorebook', hint: 'Fixes an existing lorebook entry: a duplicate, an outdated description, a bad label' },
+};
+
+function kindPill(kind) {
+  const k = KIND_INFO[kind];
+  return k ? `<span class="pill kind-pill kind-${kind}" title="${escapeHtml(k.hint)}">${k.label}</span>` : '';
 }
 
-/** Rows for hand-editing: every field that has text, unchanged to start with. */
-function rowsFromCard(fields) {
-  return Object.entries(fields)
-    .filter(([, text]) => text && text.trim())
-    .map(([field, text]) => ({ field, before: text, after: text, why: '', inflated: false, lostMacros: false }));
-}
-
-function renderEditor() {
-  const { id, name, source, headline, previousScore, rows } = editor;
-  const improving = source === 'improve';
-
-  let html = `<h2>${improving ? 'Improved draft' : 'Edit card'}: ${escapeHtml(name)}</h2>${improving && editor.keepQuotes ? stepper(3) : ''}`;
-  html += `<div id="lostQuotes"></div>`;
-
-  html += `<div class="editor-intro">`;
-  if (improving) {
-    html += `<p>${escapeHtml(headline || 'The model suggested the changes below.')}</p>
-      <p class="folder-hint">Nothing is applied or saved yet. Saving makes a <b>new card file</b> by default —
-      your original PNG is never touched.${previousScore != null ? ` The original scores <b>${previousScore}/10</b>.` : ''}</p>`;
-  } else {
-    html += `<p class="folder-hint">Edit the card's own text. Saving as a new card leaves the original alone;
-      replacing it keeps a restorable copy in Trash either way.</p>`;
-  }
-  html += `</div>`;
-
-  if (improving && rows.some((r) => r.parts)) {
-    html += `<p class="pick-summary" id="pickSummary"></p>`;
-  }
-
-  html += rows
-    .map((row, i) => {
-      const changed = row.after !== row.before;
-      const comparing = Boolean(row.parts && TextDiff.changeCount(row.parts));
-      return `<div class="editor-row ${changed ? 'is-changed' : ''}" data-row="${i}">
-        <div class="field-title">
-          <span>${escapeHtml(fieldLabel(row.field))}</span>
-          <span class="token-delta" data-delta="${i}"></span>
-        </div>
-        ${row.why ? `<div class="field-sub"><b>Change:</b> ${escapeHtml(row.why)}</div>` : ''}
-        <div class="editor-warnings" data-warn="${i}"></div>
-        ${comparing
-          ? `<div class="pick-bar">
-               <span class="folder-hint" data-pick-count="${i}"></span>
-               <button class="secondary" data-all-new="${i}">Allow all in this field</button>
-               <button class="secondary" data-revert="${i}">Keep all original</button>
-             </div>
-             <div class="diff" data-diff="${i}">${diffHtml(row, i)}</div>
-             <label class="field-label" for="final-${i}">Final text — exactly what will be saved. Edit it freely.</label>`
-          : row.before && row.before !== row.after
-            ? `<details class="before-block">
-                 <summary>Original (${tokensOf(row.before)} tok)</summary>
-                 <pre class="card-field-text">${escapeHtml(row.before)}</pre>
-               </details>`
-            : ''}
-        <textarea class="editor-text" id="final-${i}" data-text="${i}" rows="${comparing ? 5 : 8}" spellcheck="false">${escapeHtml(row.after)}</textarea>
-        <div class="hand-note ${row.handEdited ? '' : 'hidden'}" data-hand="${i}">
-          You've edited this field by hand, so the choices above are paused (they'd overwrite your edit).
-          <button class="secondary small" data-rechoose="${i}">Discard my edits and go back to the choices</button>
-        </div>
-        ${comparing ? '' : `<div class="editor-row-actions"><button class="secondary" data-revert="${i}">Revert this field</button></div>`}
-      </div>`;
-    })
-    .join('');
-
-  if (editor.lorebook?.length) {
-    html += `<section class="lorebook-box">
-      <h3>New lorebook entries <span class="folder-hint">— moved out of the card, not deleted</span></h3>
-      <p class="folder-hint">Lorebook entries are only sent to the model when one of their keywords comes up in the
-      chat, so this text stops costing tokens every turn. Edit the keywords or the text, or remove an entry to leave
-      that text out. Existing lorebook entries are kept as they are.</p>
-      ${editor.lorebook.map((e, i) => `<div class="lore-entry ${e.include ? 'is-included' : ''}" data-lore="${i}">
-        <label class="lore-include"><input type="checkbox" data-lore-include="${i}" ${e.include ? 'checked' : ''} /> Add this lorebook entry</label>
-        <div class="lore-dupe" data-lore-check="${i}"></div>
-        <label class="field-label">Keywords (comma-separated)</label>
-        <input type="text" data-lore-keys="${i}" value="${escapeHtml(e.keys)}" />
-        <textarea class="editor-text" data-lore-text="${i}" rows="4">${escapeHtml(e.content)}</textarea>
-        <div class="editor-row-actions"><button class="secondary" data-lore-remove="${i}">Remove this entry</button></div>
-      </div>`).join('')}
-    </section>`;
-  }
-
-  html += `<div class="editor-footer">
-    <label class="editor-check"><input type="checkbox" id="editorRescore" checked /> Score it after saving</label>
-    <div class="editor-buttons">
-      <button data-save="new">Save as new card</button>
-      <button class="secondary" data-save="replace">Replace original</button>
-      <button class="secondary" data-cancel="1">Cancel</button>
-    </div>
-    <p id="editorMsg" class="folder-hint"></p>
-  </div>`;
-
-  els.modalBody.innerHTML = html;
-
-  // Token counts and warnings update as you type, because the single most
-  // useful signal while editing a card is "am I making this longer again?".
-  function refreshRow(i) {
-    const row = editor.rows[i];
-    const ta = els.modalBody.querySelector(`[data-text="${i}"]`);
-    row.after = ta.value;
-    const before = tokensOf(row.before);
-    const after = tokensOf(row.after);
-    const diff = after - before;
-    const delta = els.modalBody.querySelector(`[data-delta="${i}"]`);
-    const sign = diff > 0 ? '+' : '';
-    delta.textContent = `${before} → ${after} tok (${sign}${diff})`;
-    delta.className = `token-delta ${diff > Math.max(10, before * 0.15) ? 'is-bad' : diff < 0 ? 'is-good' : ''}`;
-
-    const warnings = [];
-    if (diff > Math.max(10, before * 0.15) && before >= 40) {
-      warnings.push('Longer than the original — a padded card scores worse, not better.');
-    }
-    // Losing a repeated macro is fine editing; losing the last one means the
-    // card no longer addresses the user (or itself) at all, which breaks it.
-    const dropped = ['user', 'char'].filter((m) => {
-      const re = new RegExp(`\\{\\{${m}\\}\\}`, 'g');
-      return (row.before.match(re) || []).length > 0 && (row.after.match(re) || []).length === 0;
-    });
-    if (dropped.length) {
-      warnings.push(`No ${dropped.map((m) => `{{${m}}}`).join(' or ')} left — the original used it.`);
-    }
-    if (!row.after.trim() && row.before.trim()) warnings.push('This field is now empty.');
-    els.modalBody.querySelector(`[data-warn="${i}"]`).innerHTML = warnings
-      .map((w) => `<div class="editor-warning">⚠ ${escapeHtml(w)}</div>`)
-      .join('');
-    els.modalBody.querySelector(`[data-row="${i}"]`).classList.toggle('is-changed', row.after !== row.before);
-    renderLostQuotes();
-  }
-
-  // ---- per-change choices ----
-  const hasChoices = (row) => Boolean(row.parts && TextDiff.changeCount(row.parts));
-
-  function renderPickState(i) {
-    const row = editor.rows[i];
-    if (!hasChoices(row)) return;
-    els.modalBody.querySelector(`[data-diff="${i}"]`).innerHTML = diffHtml(row, i);
-    const used = row.choices.filter((c) => c === 'new').length;
-    els.modalBody.querySelector(`[data-pick-count="${i}"]`).textContent = row.handEdited
-      ? 'Edited by hand'
-      : `Allowed ${used} of ${row.choices.length} change${row.choices.length === 1 ? '' : 's'}`;
-    els.modalBody.querySelector(`[data-hand="${i}"]`).classList.toggle('hidden', !row.handEdited);
-    const summary = els.modalBody.querySelector('#pickSummary');
-    if (summary) {
-      const all = editor.rows.filter(hasChoices);
-      const total = all.reduce((n, r) => n + r.choices.length, 0);
-      const taken = all.reduce((n, r) => n + r.choices.filter((c) => c === 'new').length, 0);
-      summary.textContent = `Allowed ${taken} of ${total} suggested change${total === 1 ? '' : 's'}. ` +
-        'Nothing is applied until you allow it: compare each change side by side, allow the ones you want, ' +
-        'then edit the final text however you like.';
-    }
-  }
-
-  // Apply the choices to the final text (unless you've taken over by hand).
-  function applyChoices(i) {
-    const row = editor.rows[i];
-    row.handEdited = false;
-    els.modalBody.querySelector(`[data-text="${i}"]`).value = composedText(row);
-    refreshRow(i);
-    renderPickState(i);
-  }
-
-  els.modalBody.addEventListener('click', (e) => {
-    const pick = e.target.closest('[data-pick]');
-    if (pick && !pick.disabled) {
-      const row = editor.rows[Number(pick.dataset.row)];
-      row.choices[Number(pick.dataset.k)] = pick.dataset.pick;
-      applyChoices(Number(pick.dataset.row));
-      return;
-    }
-    const unfold = e.target.closest('[data-unfold]');
-    if (unfold) unfold.replaceWith(document.createTextNode(decodeURIComponent(unfold.dataset.unfold)));
-  });
-
-  rows.forEach((row, i) => {
-    refreshRow(i);
-    renderPickState(i);
-    els.modalBody.querySelector(`[data-text="${i}"]`).addEventListener('input', (e) => {
-      // Typing in the final text means you've taken over this field: the
-      // per-change buttons would overwrite your edit, so they pause.
-      if (hasChoices(row) && !row.handEdited && e.target.value !== composedText(row)) {
-        row.handEdited = true;
-        renderPickState(i);
-      }
-      refreshRow(i);
-    });
-    els.modalBody.querySelector(`[data-revert="${i}"]`).addEventListener('click', () => {
-      if (hasChoices(row)) {
-        row.choices = row.choices.map(() => 'old');
-        applyChoices(i);
-      } else {
-        els.modalBody.querySelector(`[data-text="${i}"]`).value = row.before;
-        refreshRow(i);
-      }
-    });
-    els.modalBody.querySelector(`[data-all-new="${i}"]`)?.addEventListener('click', () => {
-      row.choices = row.choices.map(() => 'new');
-      applyChoices(i);
-    });
-    els.modalBody.querySelector(`[data-rechoose="${i}"]`)?.addEventListener('click', () => applyChoices(i));
-  });
-
-  for (const box of els.modalBody.querySelectorAll('[data-lore-include]')) {
-    box.addEventListener('change', () => {
-      const n = Number(box.dataset.loreInclude);
-      editor.lorebook[n].include = box.checked;
-      box.closest('.lore-entry').classList.toggle('is-included', box.checked);
-      renderLostQuotes();
-    });
-  }
-  for (const input of els.modalBody.querySelectorAll('[data-lore-keys]')) {
-    input.addEventListener('input', () => { editor.lorebook[Number(input.dataset.loreKeys)].keys = input.value; renderLostQuotes(); });
-  }
-  for (const ta of els.modalBody.querySelectorAll('[data-lore-text]')) {
-    ta.addEventListener('input', () => { editor.lorebook[Number(ta.dataset.loreText)].content = ta.value; renderLostQuotes(); });
-  }
-  for (const b of els.modalBody.querySelectorAll('[data-lore-remove]')) {
-    b.addEventListener('click', () => {
-      editor.lorebook.splice(Number(b.dataset.loreRemove), 1);
-      renderEditor(); // field edits are already in editor.rows (kept in sync on every keystroke)
-    });
-  }
-  renderLostQuotes();
-
-  els.modalBody.querySelector('[data-cancel]').addEventListener('click', () => openCard(id));
-  for (const btn of els.modalBody.querySelectorAll('[data-save]')) {
-    btn.addEventListener('click', () => saveEditor(btn.dataset.save));
-  }
-}
-
-/**
- * The card's protected exact lines that are no longer anywhere in it. Checked
- * live, so restoring a line by hand clears the warning. Only lines that were in
- * a field being rewritten can go missing — untouched fields keep theirs.
- */
-/**
- * A lorebook move is two halves: text leaves a field, and an entry holding it is
- * added. Allowed separately they can disagree — text removed but no entry
- * (it would be lost), or an entry added while the text is still in the field
- * (it would be sent twice). Say so on the entry.
- */
-function renderLoreChecks() {
-  if (!editor?.lorebook?.length) return;
-  const finalText = editor.rows.map((r) => r.after).join('\n');
-  const originalText = editor.rows.map((r) => r.before).join('\n');
-  editor.lorebook.forEach((e, i) => {
-    const el = els.modalBody.querySelector(`[data-lore-check="${i}"]`);
-    if (!el) return;
-    const sentences = TextDiff.splitUnits(e.content).map((u) => u.trim()).filter((u) => u.length > 20);
-    const stillInCard = sentences.some((u) => finalText.includes(u));
-    const wasInCard = sentences.some((u) => originalText.includes(u));
-    let msg = '';
-    if (e.include && stillInCard) msg = '⚠ This text is still in the card too, so it would be sent twice. Allow the change that moves it out, or don\'t add this entry.';
-    else if (!e.include && wasInCard && !stillInCard) msg = '⚠ You allowed moving this text out of the card, but this entry isn\'t added — the text would be lost. Add the entry, or keep the original.';
-    el.innerHTML = msg ? `<div class="editor-warning ${msg.includes('lost') ? 'tone-bad' : ''}">${escapeHtml(msg)}</div>` : '';
-  });
-}
-
-function renderLostQuotes() {
-  renderLoreChecks();
-  const box = els.modalBody.querySelector('#lostQuotes');
-  if (!box || !editor?.keepQuotes?.length) return;
-  const after = editor.rows.map((r) => r.after).concat((editor.lorebook || []).map((e) => e.content)).join('\n');
-  const before = editor.rows.map((r) => r.before).join('\n');
-  const lost = editor.keepQuotes.filter((q) => before.includes(q) && !after.includes(q));
-  box.innerHTML = lost.length
-    ? `<div class="editor-warning tone-bad">⚠ ${lost.length === 1 ? 'A line you protected is' : `${lost.length} lines you protected are`} no longer in the card:
-        ${lost.map((q) => `<div class="lost-quote">“${escapeHtml(q)}”</div>`).join('')}
-        Revert the field it was in, or paste the line back.</div>`
-    : '';
-}
-
-async function saveEditor(mode) {
-  const msg = els.modalBody.querySelector('#editorMsg');
-  const changed = {};
-  for (const row of editor.rows) {
-    if (row.after !== row.before) changed[row.field] = row.after;
-  }
-  const lorebookEntries = (editor.lorebook || [])
-    .filter((e) => e.include)
-    .map((e) => ({ keys: e.keys.split(',').map((k) => k.trim()).filter(Boolean), content: e.content.trim() }))
-    .filter((e) => e.keys.length && e.content);
-  if (!Object.keys(changed).length && !lorebookEntries.length) {
-    msg.textContent = editor.source === 'improve'
-      ? 'Nothing is allowed yet — allow at least one change (or add a lorebook entry, or edit the text), or Cancel.'
-      : 'Nothing has changed yet — edit something, or Cancel.';
-    return;
-  }
-  // A lorebook move whose two halves disagree would lose or double text.
-  const loreProblem = els.modalBody.querySelector('[data-lore-check] .editor-warning');
-  if (loreProblem && !confirm(`${loreProblem.textContent.replace('⚠ ', '')}\n\nSave anyway?`)) return;
-  if (mode === 'replace' && !confirm(
-    `Overwrite "${editor.name}" with this version?\n\n` +
-    `${Object.keys(changed).length} field(s) change${lorebookEntries.length ? `, ${lorebookEntries.length} lorebook entr${lorebookEntries.length === 1 ? 'y is' : 'ies are'} added` : ''}. A copy of the current file is kept in Trash, so this is undoable.`,
-  )) return;
-
-  const rescore = els.modalBody.querySelector('#editorRescore').checked;
-  for (const b of els.modalBody.querySelectorAll('[data-save]')) b.disabled = true;
-  msg.textContent = rescore ? 'Saving and scoring…' : 'Saving…';
-
-  try {
-    const res = await api(`/api/cards/${encodeURIComponent(editor.id)}/save`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ fields: changed, mode, rescore, lorebookEntries }),
-    });
-    await loadCards();
-
-    const now = res.entry?.result?.overall_score;
-    const was = res.previousScore;
-    let verdict = '';
-    if (now != null && was != null) {
-      const diff = Math.round((now - was) * 10) / 10;
-      verdict = diff > 0 ? `${was} → ${now} / 10  (+${diff})` : diff < 0 ? `${was} → ${now} / 10  (${diff})` : `still ${now} / 10`;
-    } else if (now != null) {
-      verdict = `${now} / 10`;
-    }
-    const lines = [
-      mode === 'new' ? `Saved as a new card: ${res.file}` : `Replaced ${res.file}`,
-      verdict ? `Score: ${verdict}` : 'Saved — not scored yet.',
-    ];
-    if (res.entry?.scoreError) lines.push(`(Saved fine, but scoring it failed: ${res.entry.scoreError})`);
-    if (res.backedUpAs) lines.push(`The previous version is in Trash as: ${res.backedUpAs}`);
-    alert(lines.join('\n\n'));
-    await openCard(res.file);
-  } catch (err) {
-    msg.textContent = `Could not save: ${err.message}`;
-    for (const b of els.modalBody.querySelectorAll('[data-save]')) b.disabled = false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Improve with AI, step 1 of 2: choose what to change.
-//
-// The model reads the card and its rating, names what makes the card itself
-// (the keep list — kept in any rewrite, and editable here), and proposes
-// specific changes. You tick the ones you want. Only those changes are made,
-// and only the fields they touch are even sent for rewriting.
-// ---------------------------------------------------------------------------
-
-let ideasState = null; // { id, name, previousScore, hadCritique, keep, keepQuotes, ideas, chosen:Set }
+const ASPECT_LABEL = {
+  look: 'Look', personality: 'Personality', voice: 'Voice', goals: 'Goals', relationships: 'Relationships',
+  powers: 'Powers', setting: 'Setting', format: 'Format', other: 'Also keep',
+};
 
 function stepper(active) {
-  const steps = ['Rating', 'Choose ideas', 'Review rewrite'];
+  const steps = ['Rating', 'Choose ideas', 'Review changes'];
   return `<ol class="stepper">${steps.map((s, i) =>
     `<li class="${i + 1 === active ? 'is-active' : i + 1 < active ? 'is-done' : ''}">${i + 1}. ${s}</li>`).join('')}</ol>`;
 }
 
+// ---- step 1 → 2: critique (if needed), then ideas ----
+
+let ideasState = null;
+
 async function startImprove(id, name) {
-  // The chain is critique → ideas → rewrite, each feeding the next: the ideas
-  // aim at what the critique found, and the rewrite gets the ideas you ticked.
-  // A card with only a fast score (or none) gets its critique written first —
-  // it's saved to the card, so it isn't spent twice.
+  // The chain is critique → ideas → edits, each feeding the next: the ideas
+  // aim at what the critique found, and the edits carry out the ideas you
+  // ticked. A card with only a fast score (or none) gets its critique written
+  // first — it's saved to the card, so it isn't spent twice.
   const known = state.cards.find((c) => c.id === id);
   let critiqueFailed = null;
   let critiqued = false;
@@ -1971,10 +1630,13 @@ async function startImprove(id, name) {
     }
   }
   els.modalBody.innerHTML = `<h2>Improve: ${escapeHtml(name)}</h2>${stepper(2)}
-    <p class="editor-working">Reading the card and its critique, and drafting ideas…</p>
-    <p class="folder-hint">${critiqued || critiqueFailed ? 'Request 2 of 2' : 'One request'}. Nothing is rewritten in this step.</p>`;
+    <p class="editor-working">Reading the card, its critique and its lorebook, and drafting ideas…</p>
+    <p class="folder-hint">${critiqued || critiqueFailed ? 'Request 2 of 2' : 'One request'}. Nothing is changed in this step.</p>`;
   try {
     const data = await api(`/api/cards/${encodeURIComponent(id)}/ideas`, { method: 'POST' });
+    const preTick = (i) => !i.risk && (
+      (['fix', 'combine', 'extend', 'lorebook'].includes(i.kind) && i.impact !== 'low') ||
+      (i.kind === 'move' && i.impact === 'high'));
     ideasState = {
       id,
       name: data.name,
@@ -1982,11 +1644,12 @@ async function startImprove(id, name) {
       hadCritique: data.hadCritique,
       critiqueFailed,
       lorebookSupported: data.lorebookSupported,
-      keep: data.keep,
-      keepQuotes: data.keepQuotes,
+      canon: (data.canon || []).map((c) => ({ ...c, keep: true })),
+      extraKeep: '',
       ideas: data.ideas,
       // Pre-tick what is clearly worth it and doesn't risk the card's feel.
-      chosen: new Set(data.ideas.filter((i) => i.impact !== 'low' && !i.risk).map((i) => i.id)),
+      // A trim is never pre-ticked: removing things is always your call.
+      chosen: new Set(data.ideas.filter(preTick).map((i) => i.id)),
     };
     renderIdeas();
   } catch (err) {
@@ -2015,17 +1678,26 @@ function renderIdeas() {
       : `This card has no complete critique, so these ideas are based on the text alone.
         For ideas aimed at what a critique finds, close this and press <b>Rescore with full critique</b> first.`}</div>`;
   }
-  html += `<p class="folder-hint">Tick the changes you want. Only those are made, only the fields they touch are
-    sent for rewriting, and everything on the keep list below is treated as untouchable. You review the result
-    before anything is saved.</p>`;
+  html += `<p class="folder-hint">Tick the changes you want. They come back as <b>precise edits to the card's own
+    text</b> — never a rewrite of whole fields — and you see each one in place, beside the original, before anything
+    is saved.</p>`;
 
-  html += `<section class="keep-box">
-    <h3>What makes this card itself — kept in any rewrite</h3>
-    <p class="folder-hint">One per line. Add anything you want protected, or remove anything you're happy to change.</p>
-    <textarea id="keepText" rows="${Math.min(8, Math.max(3, st.keep.length + 1))}" spellcheck="true">${escapeHtml(st.keep.join('\n'))}</textarea>
-    ${st.keepQuotes.length ? `<p class="folder-hint">Exact lines that must survive word for word (checked after the rewrite):</p>
-      <ul class="quote-list">${st.keepQuotes.map((q, i) => `<li><span>“${escapeHtml(q)}”</span>
-        <button class="secondary small" data-unquote="${i}" title="Stop protecting this line">✕</button></li>`).join('')}</ul>` : ''}
+  // The canon, grouped by aspect: what every change must leave intact.
+  const groups = {};
+  st.canon.forEach((c, i) => { (groups[c.aspect] ||= []).push({ ...c, i }); });
+  html += `<section class="keep-box canon-box">
+    <h3>The canon — what makes this card itself</h3>
+    <p class="folder-hint">Sent with every change as a hard rule. Quoted lines are also checked word for word in the
+      review. Untick anything you're happy to see changed.</p>
+    ${Object.keys(ASPECT_LABEL).filter((a) => groups[a]).map((a) => `<div class="canon-group">
+      <h4>${ASPECT_LABEL[a]}</h4>
+      ${groups[a].map((c) => `<label class="canon-item ${c.keep ? '' : 'is-off'}">
+        <input type="checkbox" data-canon="${c.i}" ${c.keep ? 'checked' : ''} />
+        <span><span class="canon-fact">${escapeHtml(c.fact)}</span>${c.quote ? ` <q class="canon-quote">${escapeHtml(c.quote)}</q>` : ''}</span>
+      </label>`).join('')}
+    </div>`).join('')}
+    <label class="field-label" for="keepText">Anything else to keep — one per line</label>
+    <textarea id="keepText" rows="2" spellcheck="true" placeholder="e.g. Her outfit stays exactly as described">${escapeHtml(st.extraKeep)}</textarea>
   </section>`;
 
   html += `<section class="ideas-list"><h3>Ideas <span class="folder-hint" id="ideasCount"></span></h3>`;
@@ -2034,13 +1706,14 @@ function renderIdeas() {
       <input type="checkbox" ${st.chosen.has(idea.id) ? 'checked' : ''} />
       <div class="idea-body">
         <div class="idea-head">
+          ${kindPill(idea.kind)}
           <b>${escapeHtml(idea.title)}</b>
-          <span class="pill">${escapeHtml(fieldLabel(idea.field))}</span>
+          <span class="pill">${escapeHtml(idea.fieldLabel || fieldLabel(idea.field))}</span>
           <span class="pill impact-${escapeHtml(idea.impact)}">${escapeHtml(impactLabel[idea.impact] || idea.impact)}</span>
-          ${idea.lorebook ? '<span class="pill tone-accent" title="Moves text into a lorebook entry instead of deleting it">→ lorebook</span>' : ''}
         </div>
         <div class="idea-change">${escapeHtml(idea.change)}</div>
-        ${idea.why ? `<div class="field-sub"><b>Fixes:</b> ${escapeHtml(idea.why)}</div>` : ''}
+        ${idea.why ? `<div class="field-sub"><b>Why:</b> ${escapeHtml(idea.why)}</div>` : ''}
+        ${idea.quotes?.length ? `<ul class="idea-quotes">${idea.quotes.map((q) => `<li>“${escapeHtml(q.length > 220 ? `${q.slice(0, 220)}…` : q)}”</li>`).join('')}</ul>` : ''}
         ${idea.risk ? `<div class="idea-risk">⚠ Could change the feel: ${escapeHtml(idea.risk)}</div>` : ''}
       </div>
     </label>`).join('');
@@ -2048,7 +1721,7 @@ function renderIdeas() {
 
   html += `<div class="editor-footer">
     <div class="editor-buttons">
-      <button id="rewriteBtn" class="primary">Rewrite</button>
+      <button id="rewriteBtn" class="primary">Make the changes</button>
       <button class="secondary" id="ideasAllBtn">Tick all</button>
       <button class="secondary" id="ideasBackBtn">Back to the card</button>
     </div>
@@ -2061,10 +1734,10 @@ function renderIdeas() {
     els.modalBody.querySelector('#ideasCount').textContent = `${n} of ${st.ideas.length} ticked`;
     const btn = els.modalBody.querySelector('#rewriteBtn');
     btn.disabled = n === 0;
-    btn.textContent = n ? `Rewrite with ${n} chosen idea${n === 1 ? '' : 's'}` : 'Tick at least one idea';
-    const fields = new Set(st.ideas.filter((i) => st.chosen.has(i.id)).map((i) => fieldLabel(i.field)));
+    btn.textContent = n ? `Make ${n} change${n === 1 ? '' : 's'}` : 'Tick at least one idea';
+    const parts = new Set(st.ideas.filter((i) => st.chosen.has(i.id)).map((i) => i.fieldLabel || fieldLabel(i.field)));
     els.modalBody.querySelector('#ideasMsg').textContent = n
-      ? `Will rewrite: ${[...fields].join(', ')}. Everything else in the card is left exactly as it is.`
+      ? `Will edit: ${[...parts].join(', ')}. Everything outside the edited passages stays word for word.`
       : '';
   };
 
@@ -2077,16 +1750,14 @@ function renderIdeas() {
       refresh();
     });
   }
-  for (const b of els.modalBody.querySelectorAll('[data-unquote]')) {
-    b.addEventListener('click', (e) => {
-      e.preventDefault();
-      st.keep = keepFromText();
-      st.keepQuotes.splice(Number(b.dataset.unquote), 1);
-      renderIdeas();
+  for (const box of els.modalBody.querySelectorAll('[data-canon]')) {
+    box.addEventListener('change', () => {
+      st.canon[Number(box.dataset.canon)].keep = box.checked;
+      box.closest('.canon-item').classList.toggle('is-off', !box.checked);
     });
   }
+  els.modalBody.querySelector('#keepText').addEventListener('input', (e) => { st.extraKeep = e.target.value; });
   els.modalBody.querySelector('#ideasAllBtn').addEventListener('click', () => {
-    st.keep = keepFromText();
     st.ideas.forEach((i) => st.chosen.add(i.id));
     renderIdeas();
   });
@@ -2095,46 +1766,551 @@ function renderIdeas() {
   refresh();
 }
 
-function keepFromText() {
-  const ta = els.modalBody.querySelector('#keepText');
-  return (ta ? ta.value : ideasState.keep.join('\n')).split('\n').map((l) => l.trim()).filter(Boolean);
-}
-
 async function runRewrite() {
   const st = ideasState;
-  st.keep = keepFromText();
   const chosen = st.ideas.filter((i) => st.chosen.has(i.id));
+  const canon = st.canon.filter((c) => c.keep).map(({ aspect, fact, quote }) => ({ aspect, fact, quote }))
+    .concat(st.extraKeep.split('\n').map((l) => l.trim()).filter(Boolean).map((fact) => ({ aspect: 'other', fact, quote: '' })));
+  const keepQuotes = [...new Set(canon.map((c) => c.quote).filter(Boolean))];
   els.modalBody.innerHTML = `<h2>Improve: ${escapeHtml(st.name)}</h2>${stepper(3)}
-    <p class="editor-working">Rewriting with ${chosen.length} chosen idea${chosen.length === 1 ? '' : 's'}…</p>
-    <p class="folder-hint">Only ${escapeHtml([...new Set(chosen.map((i) => fieldLabel(i.field)))].join(', '))}
-    ${chosen.length === 1 ? 'is' : 'are'} sent. Nothing is saved until you review it.</p>`;
+    <p class="editor-working">Making ${chosen.length} change${chosen.length === 1 ? '' : 's'} as edits to the card's own text…</p>
+    <p class="folder-hint">Nothing is saved until you've looked at each one.</p>`;
   try {
     const data = await api(`/api/cards/${encodeURIComponent(st.id)}/improve`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ideas: chosen, keep: st.keep, keepQuotes: st.keepQuotes }),
+      body: JSON.stringify({ ideas: chosen, canon, keep: canon.map((c) => c.fact), keepQuotes }),
     });
-    editor = {
-      id: st.id,
-      name: data.name,
-      source: 'improve',
-      headline: data.headline,
-      previousScore: data.previousScore,
-      rows: rowsFromProposal(data),
-      // Like every other change, a lorebook entry is only added once you allow it.
-      lorebook: (data.lorebookEntries || []).map((e) => ({ keys: e.keys.join(', '), content: e.content, include: false })),
-      lostQuotes: data.lostQuotes || [],
-      keepQuotes: st.keepQuotes,
-    };
-    renderEditor();
+    startReview(data, { keepQuotes });
   } catch (err) {
     showImproveError(st.id, st.name, err);
   }
 }
 
+// ---- step 3: review the edits ----
+
+const LORE_TARGET = /^lorebook:(\d+)$/;
+
+function startReview(data, { keepQuotes = [] } = {}) {
+  const parts = Object.keys(data.before).map((target) => ({
+    target,
+    label: data.labels?.[target] || fieldLabel(target),
+    before: data.before[target],
+    edits: data.edits
+      .filter((e) => e.target === target)
+      .map((e, order) => ({ ...e, order, origNew: e.new, use: true })),
+    handEdited: false,
+    after: '',
+  }));
+  editor = {
+    id: data.id,
+    name: data.name,
+    source: 'improve',
+    headline: data.headline,
+    previousScore: data.previousScore,
+    parts,
+    // A new entry from a move is on by default: with it, the moved text is
+    // still in the card, so the move loses nothing.
+    lorebook: (data.lorebookEntries || []).map((e) => ({ keys: e.keys.join(', '), content: e.content, include: true })),
+    unplaced: data.unplaced || [],
+    rest: data.rest || '',
+    keepQuotes,
+  };
+  CardEdits.defaultUses(parts, reviewExtraText());
+  renderReview();
+}
+
+/** The rest of the card plus the new lorebook entries you've kept — for "is this detail still anywhere?". */
+function reviewExtraText() {
+  return [editor.rest, ...(editor.lorebook || []).filter((e) => e.include).map((e) => e.content)].join('\n');
+}
+
+function partFinal(p) {
+  return p.handEdited ? p.after : CardEdits.compose(p.before, p.edits);
+}
+
+/** A little of the surrounding text, cut at word boundaries, so a change can be read in place. */
+function contextOf(text, start, end, n = 150) {
+  let a = Math.max(0, start - n);
+  let b = Math.min(text.length, end + n);
+  if (a > 0) { const sp = text.indexOf(' ', a); if (sp !== -1 && sp < start) a = sp + 1; }
+  if (b < text.length) { const sp = text.lastIndexOf(' ', b); if (sp > end) b = sp; }
+  return { pre: (a > 0 ? '…' : '') + text.slice(a, start), post: text.slice(end, b) + (b < text.length ? '…' : '') };
+}
+
+function editSidesHtml(p, e) {
+  if (e.action === 'disable') {
+    const preview = p.before.length > 300 ? `${p.before.slice(0, 300)}…` : p.before;
+    return `<div class="edit-side side-old"><span class="hunk-label">Card now</span><b>On.</b> ${escapeHtml(preview)}</div>
+      <div class="edit-side side-new"><span class="hunk-label">With this change</span><b>Switched off.</b> The entry stays in the
+        card (nothing is deleted) and can be switched back on in SillyTavern's lorebook editor.</div>`;
+  }
+  const { pre, post } = contextOf(p.before, e.start, e.end);
+  const w = TextDiff.wordDiff(e.old, e.new);
+  const caret = (title) => `<span class="edit-caret" title="${title}">⁁</span>`;
+  const oldMid = e.old ? `<span class="edit-old">${highlightWords(w.old, 'w-del')}</span>` : caret('The new text goes here');
+  const newMid = e.new ? `<span class="edit-new">${highlightWords(w.new, 'w-add')}</span>` : caret('Removed from here');
+  return `<div class="edit-side side-old"><span class="hunk-label">Card now</span>${escapeHtml(pre)}${oldMid}${escapeHtml(post)}</div>
+    <div class="edit-side side-new"><span class="hunk-label">With this change</span>${escapeHtml(pre)}${newMid}${escapeHtml(post)}</div>`;
+}
+
+function actionLabel(e) {
+  return { replace: e.new ? 'Reworded' : 'Removed', insert_after: 'Added', insert_before: 'Added', disable: 'Switched off' }[e.action] || 'Change';
+}
+
+function editCardHtml(p, pi, e, ei) {
+  const key = `${pi}-${ei}`;
+  const shape = e.action === 'disable' ? 'disable' : e.old ? (e.new ? 'replace' : 'remove') : 'insert';
+  return `<div class="edit-card ${e.use ? 'is-on' : 'is-off'} is-${shape}" data-edit="${key}">
+    <div class="edit-head">
+      <label class="edit-use"><input type="checkbox" data-use="${key}" ${e.use ? 'checked' : ''} ${p.handEdited ? 'disabled' : ''} />
+        <span>Use this change</span></label>
+      ${kindPill(e.kind)}
+      <b class="edit-title">${escapeHtml(e.ideaTitle || actionLabel(e))}</b>
+      <span class="edit-shape">${actionLabel(e)}</span>
+    </div>
+    ${e.why ? `<div class="field-sub">${escapeHtml(e.why)}</div>` : ''}
+    <div class="edit-sides" data-sides="${key}">${editSidesHtml(p, e)}</div>
+    <div class="edit-check" data-check="${key}"></div>
+    ${e.action === 'disable' ? '' : `<details class="edit-tweak">
+      <summary>Adjust this change</summary>
+      <textarea class="editor-text" data-tweak="${key}" rows="${Math.min(10, Math.max(3, Math.ceil(e.new.length / 70) + 1))}" spellcheck="true">${escapeHtml(e.new)}</textarea>
+      <button class="secondary small" data-untweak="${key}" ${e.new === e.origNew ? 'disabled' : ''}>Back to the suggestion</button>
+    </details>`}
+  </div>`;
+}
+
+function renderReview() {
+  const { name, headline, previousScore, parts } = editor;
+  let html = `<h2>Review changes: ${escapeHtml(name)}</h2>${stepper(3)}`;
+  html += `<div id="lostQuotes"></div>`;
+  html += `<div class="editor-intro">
+    <p>${escapeHtml(headline || 'The model suggested the changes below.')}</p>
+    <p class="folder-hint">Each change edits one exact passage — everything else stays word for word. A change that would
+      remove a detail found nowhere else in the card starts <b>off</b>; the rest start on. Nothing is saved until you
+      press Save, and saving makes a <b>new card file</b> by default.${previousScore != null ? ` The original scores <b>${previousScore}/10</b>.` : ''}</p>
+  </div>
+  <div class="review-bar">
+    <span id="reviewSummary"></span>
+    <span class="review-bar-buttons">
+      <button class="secondary small" id="useSafeBtn">Use all safe changes</button>
+      <button class="secondary small" id="useNoneBtn">Use none</button>
+    </span>
+  </div>`;
+
+  parts.forEach((p, pi) => {
+    const lore = LORE_TARGET.test(p.target);
+    html += `<section class="edit-target" data-part="${pi}">
+      <div class="field-title"><span>${escapeHtml(p.label)}</span><span class="token-delta" data-delta="${pi}"></span></div>
+      <div class="editor-warnings" data-warn="${pi}"></div>
+      <div class="edit-list">${p.edits.map((e, ei) => editCardHtml(p, pi, e, ei)).join('')}</div>
+      <details class="whole-compare" data-compare="${pi}">
+        <summary>Compare the whole ${lore ? 'entry' : 'field'} side by side</summary>
+        <div class="compare-cols" data-cols="${pi}"></div>
+      </details>
+      ${p.edits.some((e) => e.action !== 'disable') ? `<details class="hand-edit" ${p.handEdited ? 'open' : ''}>
+        <summary>Edit the final text by hand</summary>
+        <textarea class="editor-text" data-final="${pi}" rows="8" spellcheck="false"></textarea>
+        <div class="hand-note ${p.handEdited ? '' : 'hidden'}" data-hand="${pi}">
+          You've edited this by hand, so the change switches above are paused (they'd overwrite your edit).
+          <button class="secondary small" data-rehand="${pi}">Discard my edits and go back to the switches</button>
+        </div>
+      </details>` : ''}
+    </section>`;
+  });
+
+  if (editor.lorebook.length) {
+    html += `<section class="lorebook-box">
+      <h3>New lorebook entries <span class="folder-hint">— moved out of the card, not deleted</span></h3>
+      <p class="folder-hint">Lorebook entries are only sent to the model when one of their keywords comes up in the
+      chat, so this text stops costing tokens every turn. Edit the keywords or the text, or leave an entry out.</p>
+      ${editor.lorebook.map((e, i) => `<div class="lore-entry ${e.include ? 'is-included' : ''}" data-lore="${i}">
+        <label class="lore-include"><input type="checkbox" data-lore-include="${i}" ${e.include ? 'checked' : ''} /> Add this lorebook entry</label>
+        <div class="lore-dupe" data-lore-check="${i}"></div>
+        <label class="field-label">Keywords (comma-separated)</label>
+        <input type="text" data-lore-keys="${i}" value="${escapeHtml(e.keys)}" />
+        <textarea class="editor-text" data-lore-text="${i}" rows="4">${escapeHtml(e.content)}</textarea>
+      </div>`).join('')}
+    </section>`;
+  }
+
+  if (editor.unplaced.length) {
+    html += `<details class="unplaced" open>
+      <summary>${editor.unplaced.length} suggestion${editor.unplaced.length === 1 ? '' : 's'} couldn't be placed — nothing in the card changes for ${editor.unplaced.length === 1 ? 'it' : 'them'}</summary>
+      <p class="folder-hint">The model quoted text that isn't in the card exactly, or is there more than once, so there's no
+        safe place to put the change. Copy anything you like into "Edit the final text by hand".</p>
+      ${editor.unplaced.map((u) => `<div class="unplaced-item">
+        <div class="field-sub"><b>${escapeHtml(u.label || u.target)}</b> — ${escapeHtml(u.reason)}${u.ideaTitle ? ` · from “${escapeHtml(u.ideaTitle)}”` : ''}</div>
+        ${u.find ? `<div class="dim">Quoted: “${escapeHtml(u.find.length > 240 ? `${u.find.slice(0, 240)}…` : u.find)}”</div>` : ''}
+        ${u.text ? `<pre class="card-field-text">${escapeHtml(u.text)}</pre>` : ''}
+      </div>`).join('')}
+    </details>`;
+  }
+
+  html += editorFooterHtml();
+  // A fresh container per render: the listeners below live and die with it,
+  // instead of piling up on the modal across reviews.
+  const root = document.createElement('div');
+  root.innerHTML = html;
+  els.modalBody.replaceChildren(root);
+
+  const editAt = (key) => { const [pi, ei] = key.split('-').map(Number); return { p: parts[pi], pi, e: parts[pi].edits[ei] }; };
+
+  root.addEventListener('change', (ev) => {
+    const use = ev.target.closest('[data-use]');
+    if (use) {
+      editAt(use.dataset.use).e.use = use.checked;
+      refreshReview();
+      return;
+    }
+    const inc = ev.target.closest('[data-lore-include]');
+    if (inc) {
+      editor.lorebook[Number(inc.dataset.loreInclude)].include = inc.checked;
+      inc.closest('.lore-entry').classList.toggle('is-included', inc.checked);
+      refreshReview();
+    }
+  });
+  root.addEventListener('input', (ev) => {
+    const tweak = ev.target.closest('[data-tweak]');
+    if (tweak) {
+      const { p, e } = editAt(tweak.dataset.tweak);
+      e.new = tweak.value;
+      els.modalBody.querySelector(`[data-sides="${tweak.dataset.tweak}"]`).innerHTML = editSidesHtml(p, e);
+      els.modalBody.querySelector(`[data-untweak="${tweak.dataset.tweak}"]`).disabled = e.new === e.origNew;
+      refreshReview();
+      return;
+    }
+    const fin = ev.target.closest('[data-final]');
+    if (fin) {
+      // Typing in the final text means you've taken over this part: the
+      // switches would overwrite your edit, so they pause.
+      const p = parts[Number(fin.dataset.final)];
+      p.after = fin.value;
+      if (!p.handEdited && fin.value !== CardEdits.compose(p.before, p.edits)) {
+        p.handEdited = true;
+        for (const box of els.modalBody.querySelectorAll(`[data-part="${fin.dataset.final}"] [data-use]`)) box.disabled = true;
+      }
+      refreshReview();
+      return;
+    }
+    const keys = ev.target.closest('[data-lore-keys]');
+    if (keys) { editor.lorebook[Number(keys.dataset.loreKeys)].keys = keys.value; return; }
+    const lt = ev.target.closest('[data-lore-text]');
+    if (lt) { editor.lorebook[Number(lt.dataset.loreText)].content = lt.value; refreshReview(); }
+  });
+  root.addEventListener('click', (ev) => {
+    const un = ev.target.closest('[data-untweak]');
+    if (un) {
+      const { p, e } = editAt(un.dataset.untweak);
+      e.new = e.origNew;
+      els.modalBody.querySelector(`[data-tweak="${un.dataset.untweak}"]`).value = e.new;
+      els.modalBody.querySelector(`[data-sides="${un.dataset.untweak}"]`).innerHTML = editSidesHtml(p, e);
+      un.disabled = true;
+      refreshReview();
+      return;
+    }
+    const re = ev.target.closest('[data-rehand]');
+    if (re) {
+      const p = parts[Number(re.dataset.rehand)];
+      p.handEdited = false;
+      for (const box of els.modalBody.querySelectorAll(`[data-part="${re.dataset.rehand}"] [data-use]`)) box.disabled = false;
+      refreshReview();
+    }
+  });
+  for (const d of els.modalBody.querySelectorAll('[data-compare]')) d.addEventListener('toggle', () => refreshReview());
+  els.modalBody.querySelector('#useSafeBtn').addEventListener('click', () => {
+    CardEdits.defaultUses(parts, reviewExtraText());
+    for (const box of els.modalBody.querySelectorAll('[data-use]')) box.checked = editAt(box.dataset.use).e.use;
+    refreshReview();
+  });
+  els.modalBody.querySelector('#useNoneBtn').addEventListener('click', () => {
+    for (const p of parts) if (!p.handEdited) for (const e of p.edits) e.use = false;
+    for (const box of els.modalBody.querySelectorAll('[data-use]')) box.checked = false;
+    refreshReview();
+  });
+  wireEditorFooter();
+  refreshReview();
+}
+
+/**
+ * Brings everything in the review up to date with the current choices: each
+ * change's on/off state and detail check, each part's final text and length,
+ * the whole-field comparison (when open), the summary, and the warnings about
+ * protected lines and lorebook moves.
+ */
+function refreshReview() {
+  const { parts } = editor;
+  const extra = reviewExtraText();
+  let on = 0;
+  let total = 0;
+  let wouldLose = 0;
+
+  parts.forEach((p, pi) => {
+    p.edits.forEach((e, ei) => {
+      const key = `${pi}-${ei}`;
+      total++;
+      if (e.use) on++;
+      const card = els.modalBody.querySelector(`[data-edit="${key}"]`);
+      card.classList.toggle('is-on', e.use && !p.handEdited);
+      card.classList.toggle('is-off', !e.use || p.handEdited);
+      const { lost, corrected } = CardEdits.editImpact(parts, p, e, extra);
+      const check = els.modalBody.querySelector(`[data-check="${key}"]`);
+      const fmt = (terms) => terms.slice(0, 10).map((t) => `“${escapeHtml(t)}”`).join(', ') + (terms.length > 10 ? `, and ${terms.length - 10} more` : '');
+      const list = fmt(lost);
+      if (corrected.length) {
+        check.className = 'edit-check tone-info';
+        check.innerHTML = `Corrects: ${fmt(corrected)} — replaced on purpose, to match the canon.`;
+      } else if (lost.length) {
+        wouldLose++;
+        check.className = 'edit-check tone-bad';
+        check.innerHTML = `⚠ ${e.action === 'disable' ? 'Switching this off would lose' : 'Would remove'} details found nowhere else in the card: ${list}.
+          ${e.action === 'disable' ? 'Merge them into the entry being kept first, or leave this one on.' : 'Adjust the change to keep them, or leave it off.'}`;
+      } else {
+        check.className = 'edit-check tone-good';
+        check.textContent = e.action === 'disable'
+          ? '✓ Everything in this entry is still in the card elsewhere.'
+          : e.old ? '✓ Keeps every detail.' : '✓ Adds only — nothing is removed.';
+      }
+    });
+
+    const final = partFinal(p);
+    const warn = els.modalBody.querySelector(`[data-warn="${pi}"]`);
+    const problems = macroWarnings(p.before, final);
+    warn.innerHTML = problems.map((w) => `<div class="editor-warning tone-bad">⚠ ${escapeHtml(w)}</div>`).join('');
+    const ta = els.modalBody.querySelector(`[data-final="${pi}"]`);
+    if (ta && !p.handEdited && document.activeElement !== ta) ta.value = final;
+    els.modalBody.querySelector(`[data-hand="${pi}"]`)?.classList.toggle('hidden', !p.handEdited);
+    const disabled = p.edits.some((e) => e.use && e.action === 'disable');
+    const before = tokensOf(p.before);
+    const after = tokensOf(final);
+    const diff = after - before;
+    els.modalBody.querySelector(`[data-delta="${pi}"]`).textContent = disabled
+      ? 'switched off'
+      : `${before} → ${after} tok${diff ? ` (${diff > 0 ? '+' : ''}${diff})` : ''}`;
+
+    const cmp = els.modalBody.querySelector(`[data-compare="${pi}"]`);
+    if (cmp?.open) {
+      const sp = p.handEdited
+        ? { old: [{ text: p.before }], new: [{ text: p.after }] }
+        : CardEdits.spans(p.before, p.edits);
+      const side = (list, cls) => list.map((s) => (s.mark ? `<mark class="${cls}">${escapeHtml(s.text)}</mark>` : escapeHtml(s.text))).join('');
+      els.modalBody.querySelector(`[data-cols="${pi}"]`).innerHTML = `
+        <div class="compare-col"><span class="hunk-label">Card now</span><div class="compare-text">${side(sp.old, 'w-del')}</div></div>
+        <div class="compare-col"><span class="hunk-label">${disabled ? 'Switched off' : 'After your choices'}</span><div class="compare-text">${side(sp.new, 'w-add')}</div></div>`;
+    }
+  });
+
+  const summary = els.modalBody.querySelector('#reviewSummary');
+  summary.textContent = `Using ${on} of ${total} change${total === 1 ? '' : 's'}` +
+    (wouldLose ? ` · ${wouldLose} would remove details (check before using)` : '') +
+    (editor.unplaced.length ? ` · ${editor.unplaced.length} couldn't be placed` : '');
+  renderLostQuotes();
+}
+
+/**
+ * A lorebook move is two halves: text leaves a field, and an entry holding it is
+ * added. Allowed separately they can disagree — text removed but no entry
+ * (it would be lost), or an entry added while the text is still in the field
+ * (it would be sent twice). Say so on the entry.
+ */
+function renderLoreChecks() {
+  if (!editor?.lorebook?.length) return;
+  const finalText = editor.parts.map(partFinal).join('\n');
+  const originalText = editor.parts.map((p) => p.before).join('\n');
+  editor.lorebook.forEach((e, i) => {
+    const el = els.modalBody.querySelector(`[data-lore-check="${i}"]`);
+    if (!el) return;
+    const sentences = TextDiff.splitUnits(e.content).map((u) => u.trim()).filter((u) => u.length > 20);
+    const stillInCard = sentences.some((u) => finalText.includes(u));
+    const wasInCard = sentences.some((u) => originalText.includes(u));
+    let msg = '';
+    if (e.include && stillInCard) msg = '⚠ This text is still in the card too, so it would be sent twice. Use the change that moves it out, or don\'t add this entry.';
+    else if (!e.include && wasInCard && !stillInCard) msg = '⚠ You\'re using the change that moves this text out of the card, but this entry isn\'t added — the text would be lost. Add the entry, or leave that change off.';
+    el.innerHTML = msg ? `<div class="editor-warning ${msg.includes('lost') ? 'tone-bad' : ''}">${escapeHtml(msg)}</div>` : '';
+  });
+}
+
+/**
+ * The canon's quoted lines that are no longer anywhere in the card. Checked
+ * live, so leaving a change off or restoring a line by hand clears it.
+ */
+function renderLostQuotes() {
+  renderLoreChecks();
+  const box = els.modalBody.querySelector('#lostQuotes');
+  if (!box || !editor?.keepQuotes?.length) return;
+  const extra = reviewExtraText();
+  const after = CardEdits.wholeCard(editor.parts, extra);
+  const before = editor.parts.map((p) => p.before).concat(editor.rest).join('\n');
+  const norm = (t) => t.replace(/\s+/g, ' ');
+  const lost = editor.keepQuotes.filter((q) => norm(before).includes(norm(q)) && !norm(after).includes(norm(q)));
+  box.innerHTML = lost.length
+    ? `<div class="editor-warning tone-bad">⚠ ${lost.length === 1 ? 'A canon line you protected is' : `${lost.length} canon lines you protected are`} no longer in the card:
+        ${lost.map((q) => `<div class="lost-quote">“${escapeHtml(q)}”</div>`).join('')}
+        Leave off the change that removes it, or adjust that change to keep it.</div>`
+    : '';
+}
+
+// ---- hand editing ("Edit text"), and saving for both ----
+
 function startManualEdit(id, name, fields) {
-  editor = { id, name, source: 'manual', headline: '', previousScore: null, rows: rowsFromCard(fields) };
-  renderEditor();
+  editor = {
+    id,
+    name,
+    source: 'manual',
+    rows: Object.entries(fields).filter(([, text]) => text && text.trim()).map(([field, text]) => ({ field, before: text, after: text })),
+  };
+  renderManualEditor();
+}
+
+function renderManualEditor() {
+  let html = `<h2>Edit card: ${escapeHtml(editor.name)}</h2>
+    <div class="editor-intro"><p class="folder-hint">Edit the card's own text. Saving as a new card leaves the original
+    alone; replacing it keeps a restorable copy in Trash either way.</p></div>`;
+  html += editor.rows.map((row, i) => `<div class="editor-row" data-row="${i}">
+      <div class="field-title"><span>${escapeHtml(fieldLabel(row.field))}</span><span class="token-delta" data-delta="${i}"></span></div>
+      <div class="editor-warnings" data-warn="${i}"></div>
+      <textarea class="editor-text" data-text="${i}" rows="8" spellcheck="false">${escapeHtml(row.after)}</textarea>
+      <div class="editor-row-actions"><button class="secondary" data-revert="${i}">Revert this field</button></div>
+    </div>`).join('');
+  html += editorFooterHtml();
+  els.modalBody.innerHTML = html;
+
+  const refreshRow = (i) => {
+    const row = editor.rows[i];
+    const before = tokensOf(row.before);
+    const after = tokensOf(row.after);
+    const diff = after - before;
+    els.modalBody.querySelector(`[data-delta="${i}"]`).textContent = `${before} → ${after} tok${diff ? ` (${diff > 0 ? '+' : ''}${diff})` : ''}`;
+    const warnings = macroWarnings(row.before, row.after);
+    els.modalBody.querySelector(`[data-warn="${i}"]`).innerHTML = warnings.map((w) => `<div class="editor-warning">⚠ ${escapeHtml(w)}</div>`).join('');
+    els.modalBody.querySelector(`[data-row="${i}"]`).classList.toggle('is-changed', row.after !== row.before);
+  };
+  editor.rows.forEach((row, i) => {
+    const ta = els.modalBody.querySelector(`[data-text="${i}"]`);
+    ta.addEventListener('input', () => { row.after = ta.value; refreshRow(i); });
+    els.modalBody.querySelector(`[data-revert="${i}"]`).addEventListener('click', () => { ta.value = row.before; row.after = row.before; refreshRow(i); });
+    refreshRow(i);
+  });
+  wireEditorFooter();
+}
+
+/**
+ * Losing a repeated {{user}} is fine editing; losing the last one means the
+ * text no longer addresses the user (or the character) at all, which breaks
+ * how the card plugs into SillyTavern. Also: a field emptied entirely.
+ */
+function macroWarnings(before, after) {
+  const out = [];
+  const dropped = ['user', 'char'].filter((m) => {
+    const re = new RegExp(`\\{\\{${m}\\}\\}`, 'gi');
+    return (before.match(re) || []).length > 0 && (after.match(re) || []).length === 0;
+  });
+  if (dropped.length) out.push(`No ${dropped.map((m) => `{{${m}}}`).join(' or ')} left — the original used it.`);
+  if (!after.trim() && before.trim()) out.push('This is now empty.');
+  return out;
+}
+
+function editorFooterHtml() {
+  return `<div class="editor-footer">
+    <label class="editor-check"><input type="checkbox" id="editorRescore" checked /> Score it after saving</label>
+    <div class="editor-buttons">
+      <button data-save="new">Save as new card</button>
+      <button class="secondary" data-save="replace">Replace original</button>
+      <button class="secondary" data-cancel="1">Cancel</button>
+    </div>
+    <p id="editorMsg" class="folder-hint"></p>
+  </div>`;
+}
+
+function wireEditorFooter() {
+  els.modalBody.querySelector('[data-cancel]').addEventListener('click', () => openCard(editor.id));
+  for (const btn of els.modalBody.querySelectorAll('[data-save]')) {
+    btn.addEventListener('click', () => saveEditor(btn.dataset.save));
+  }
+}
+
+/** What saving would write: changed fields, lorebook entry updates, new entries. */
+function collectChanges() {
+  const fields = {};
+  const lorebookUpdates = [];
+  if (editor.source === 'manual') {
+    for (const row of editor.rows) if (row.after !== row.before) fields[row.field] = row.after;
+  } else {
+    for (const p of editor.parts) {
+      const final = partFinal(p);
+      const m = LORE_TARGET.exec(p.target);
+      if (m) {
+        const u = { index: Number(m[1]), expect: p.before.slice(0, 40) };
+        if (final !== p.before) u.content = final;
+        if (p.edits.some((e) => e.use && e.action === 'disable')) u.enabled = false;
+        if ('content' in u || u.enabled === false) lorebookUpdates.push(u);
+      } else if (final !== p.before) {
+        fields[p.target] = final;
+      }
+    }
+  }
+  const lorebookEntries = (editor.lorebook || [])
+    .filter((e) => e.include)
+    .map((e) => ({ keys: e.keys.split(',').map((k) => k.trim()).filter(Boolean), content: e.content.trim() }))
+    .filter((e) => e.keys.length && e.content);
+  return { fields, lorebookUpdates, lorebookEntries };
+}
+
+async function saveEditor(mode) {
+  const msg = els.modalBody.querySelector('#editorMsg');
+  const { fields, lorebookUpdates, lorebookEntries } = collectChanges();
+  const nFields = Object.keys(fields).length;
+  if (!nFields && !lorebookEntries.length && !lorebookUpdates.length) {
+    msg.textContent = editor.source === 'improve'
+      ? 'No change is in use yet — switch on at least one (or edit the text), or Cancel.'
+      : 'Nothing has changed yet — edit something, or Cancel.';
+    return;
+  }
+  // Changes that would lose details, or a lorebook move whose halves disagree.
+  const problems = [...els.modalBody.querySelectorAll('.edit-card.is-on .edit-check.tone-bad, [data-lore-check] .editor-warning, #lostQuotes .editor-warning, [data-warn] .editor-warning')];
+  if (problems.length && !confirm(`${problems.length} of the changes you're using would lose something (marked ⚠).\n\nSave anyway?`)) return;
+  if (mode === 'replace') {
+    const what = [
+      nFields && `${nFields} field${nFields === 1 ? '' : 's'} change${nFields === 1 ? 's' : ''}`,
+      lorebookUpdates.length && `${lorebookUpdates.length} lorebook entr${lorebookUpdates.length === 1 ? 'y is' : 'ies are'} updated or switched off`,
+      lorebookEntries.length && `${lorebookEntries.length} lorebook entr${lorebookEntries.length === 1 ? 'y is' : 'ies are'} added`,
+    ].filter(Boolean).join(', ');
+    if (!confirm(`Overwrite "${editor.name}" with this version?\n\n${what}. A copy of the current file is kept in Trash, so this is undoable.`)) return;
+  }
+
+  const rescore = els.modalBody.querySelector('#editorRescore').checked;
+  for (const b of els.modalBody.querySelectorAll('[data-save]')) b.disabled = true;
+  msg.textContent = rescore ? 'Saving and scoring…' : 'Saving…';
+
+  try {
+    const res = await api(`/api/cards/${encodeURIComponent(editor.id)}/save`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fields, mode, rescore, lorebookEntries, lorebookUpdates }),
+    });
+    await loadCards();
+
+    const now = res.entry?.result?.overall_score;
+    const was = res.previousScore;
+    let verdict = '';
+    if (now != null && was != null) {
+      const diff = Math.round((now - was) * 10) / 10;
+      verdict = diff > 0 ? `${was} → ${now} / 10  (+${diff})` : diff < 0 ? `${was} → ${now} / 10  (${diff})` : `still ${now} / 10`;
+    } else if (now != null) {
+      verdict = `${now} / 10`;
+    }
+    const lines = [
+      mode === 'new' ? `Saved as a new card: ${res.file}` : `Replaced ${res.file}`,
+      verdict ? `Score: ${verdict}` : 'Saved — not scored yet.',
+    ];
+    if (res.entry?.scoreError) lines.push(`(Saved fine, but scoring it failed: ${res.entry.scoreError})`);
+    if (res.backedUpAs) lines.push(`The previous version is in Trash as: ${res.backedUpAs}`);
+    alert(lines.join('\n\n'));
+    await openCard(res.file);
+  } catch (err) {
+    msg.textContent = `Could not save: ${err.message}`;
+    for (const b of els.modalBody.querySelectorAll('[data-save]')) b.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2417,25 +2593,32 @@ function renderTestResult(r) {
   const raw = repliesSection(r.replies);
   if (promptUi.active === 'improve') {
     const h = document.createElement('p');
-    h.textContent = out.headline || 'The model proposed these changes:';
+    h.textContent = out.headline || 'The model proposed these edits:';
     box.append(h);
-    for (const [field, f] of Object.entries(out.fields)) {
-      box.append(outputBlock(`${field.replace(/_/g, ' ')} · ${f.tokensBefore} → ${f.tokensAfter} tok${f.why ? ` · ${f.why}` : ''}`, f.text));
+    for (const e of out.edits || []) {
+      const body = e.action === 'disable'
+        ? 'Switch this lorebook entry off.'
+        : `${e.old ? `Replaces: “${e.old}”` : `After: “${e.anchor}”`}\n→ ${e.new || '(removed)'}`;
+      box.append(outputBlock(`${e.label} · ${actionLabel(e)}${e.why ? ` · ${e.why}` : ''}`, body));
+    }
+    if (out.unplaced?.length) {
+      box.append(noteEl(`${out.unplaced.length} edit${out.unplaced.length === 1 ? '' : 's'} couldn't be placed: ${[...new Set(out.unplaced.map((u) => u.reason))].join('; ')}.`, 'warn'));
     }
     if (raw) box.append(raw);
     return box;
   }
   if (promptUi.active === 'ideas') {
-    if (out.keep?.length) box.append(outputBlock('What makes this card itself (kept in any rewrite)', out.keep.map((k) => `• ${k}`).join('\n')));
-    if (out.keepQuotes?.length) box.append(outputBlock('Exact lines to keep word for word', out.keepQuotes.map((q) => `"${q}"`).join('\n')));
+    if (out.canon?.length) {
+      box.append(outputBlock('The canon — what makes this card itself',
+        out.canon.map((c) => `• ${ASPECT_LABEL[c.aspect] || c.aspect}: ${c.fact}${c.quote ? `  “${c.quote}”` : ''}`).join('\n')));
+    }
     for (const idea of out.ideas || []) {
-      const lines = [idea.change, idea.why && `Why: ${idea.why}`, idea.risk && `Risk: ${idea.risk}`].filter(Boolean);
-      box.append(outputBlock(`${idea.field.replace(/_/g, ' ')} · ${idea.impact} impact${idea.lorebook ? ' · lorebook' : ''} — ${idea.title}`, lines.join('\n')));
+      const lines = [idea.change, idea.why && `Why: ${idea.why}`, ...(idea.quotes || []).map((q) => `“${q}”`), idea.risk && `Risk: ${idea.risk}`].filter(Boolean);
+      box.append(outputBlock(`${KIND_INFO[idea.kind]?.label || idea.kind} · ${idea.fieldLabel || fieldLabel(idea.field)} · ${idea.impact} impact — ${idea.title}`, lines.join('\n')));
     }
     if (raw) box.append(raw);
     return box;
   }
-
   const big = document.createElement('div');
   big.className = 'overall-block';
   const score = document.createElement('div');

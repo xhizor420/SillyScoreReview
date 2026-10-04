@@ -324,25 +324,28 @@ async function main() {
     assert.equal(copySelf.status, 400);
     console.log('✓ copying a folder onto itself is refused');
 
-    // improve + save: the model rewrites, nothing is written until asked, and
-    // saving as a new card leaves the original (and its score) alone
+    // improve + save: the model proposes edits, nothing is written until asked,
+    // and saving as a new card leaves the original (and its score) alone
+    const { applyEdits } = await import('../src/improver.js');
     const improveRes = await fetch('http://localhost:4180/api/cards/good-card.png/improve', { method: 'POST' });
     const improve = await improveRes.json();
     assert.equal(improveRes.status, 200, `improve failed: ${JSON.stringify(improve)}`);
-    assert.ok(Object.keys(improve.fields).length > 0, 'expected at least one rewritten field');
-    const firstField = Object.keys(improve.fields)[0];
+    assert.ok(improve.edits.length > 0, 'expected at least one placed edit');
+    const firstField = improve.edits[0].target;
     assert.ok(improve.before[firstField], 'the original text must come back for side-by-side review');
-    assert.ok(improve.fields[firstField].tokensAfter <= improve.fields[firstField].tokensBefore,
-      'the mock edit should be no longer than the original');
+    const e0 = improve.edits[0];
+    assert.equal(improve.before[firstField].slice(e0.start, e0.end), e0.old, 'each edit says exactly which text it replaces');
+    const proposedText = applyEdits(improve.before[firstField], improve.edits.filter((e) => e.target === firstField).map((e, order) => ({ ...e, order })));
+    assert.ok(proposedText.startsWith(improve.before[firstField].slice(0, e0.start)), 'text before an edit is untouched');
     assert.deepEqual((await readdir(charactersDir)).sort(), ['bloated-card.png', 'good-card.png'],
       'asking for an improvement must not write any file');
-    console.log(`✓ improve returns a reviewable draft (${Object.keys(improve.fields).length} field(s)) and writes nothing`);
+    console.log(`✓ improve returns ${improve.edits.length} placed edit(s) against the exact original text, and writes nothing`);
 
     const saveRes = await fetch('http://localhost:4180/api/cards/good-card.png/save', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        fields: { [firstField]: improve.fields[firstField].text },
+        fields: { [firstField]: proposedText },
         mode: 'new',
         rescore: true,
       }),
@@ -356,7 +359,7 @@ async function main() {
     console.log(`✓ saving as a new card writes "${saved.file}", scores it, and records the ${saved.previousScore}/10 it came from`);
 
     const improvedCard = await extractCardFromPng(await readFile(path.join(charactersDir, saved.file)));
-    assert.equal(improvedCard.fields[firstField], improve.fields[firstField].text);
+    assert.equal(improvedCard.fields[firstField], proposedText);
     const untouched = await extractCardFromPng(await readFile(path.join(charactersDir, 'good-card.png')));
     assert.equal(untouched.fields[firstField], improve.before[firstField], 'the original card must be byte-identical in content');
     const listWithImproved = await (await fetch('http://localhost:4180/api/cards')).json();
@@ -433,6 +436,8 @@ async function main() {
   await testEditablePrompts();
   await testIdeasThenRewrite();
   await testChangePicker();
+  await testWriterLorebookAndNote();
+  await testCardEditsReview();
   await testTwoPassAndRawReplies();
 
   console.log('\nAll self-tests passed.');
@@ -827,15 +832,15 @@ async function testCardRoundTrip() {
 
 /** The rewrite path must refuse to silently pad a card — that was the whole complaint. */
 async function testImproverGuards() {
-  const { buildImprovePrompts, measureFields, improveCard } = await import('../src/improver.js');
+  const { buildImprovePrompts, improveCard, placeEdits, applyEdits, editTargets, locate } = await import('../src/improver.js');
 
   const card = {
     name: 'Guard Test',
     fields: {
-      description: 'x '.repeat(200).trim(), // ~200 tokens of original
+      description: 'Wren keeps the lighthouse. She is 180 cm tall. She is quiet. She wears a grey oilskin coat.',
       personality: 'terse',
       scenario: '',
-      first_mes: 'Hi {{user}}, {{char}} here, {{user}}.',
+      first_mes: 'Hi {{user}}, {{char}} here, {{user}}. She is quiet.',
       mes_example: '',
       system_prompt: '',
       post_history_instructions: '',
@@ -850,36 +855,72 @@ async function testImproverGuards() {
 
   const prompts = buildImprovePrompts(card, critique);
   assert.match(prompts.user, /Critique of this field: scored 3\/10; weaknesses: vague/);
-  assert.match(prompts.user, /your rewrite must not exceed this/);
-  assert.match(prompts.system, /DO NOT PAD/);
-  assert.ok(!prompts.user.includes('### scenario'), 'empty fields should not be offered for rewriting');
-  console.log('✓ the improve prompt carries the per-field critique and a hard token budget');
+  assert.doesNotMatch(prompts.user, /must not exceed|token budget/, 'no length cap: a cap is what made rewrites cut details');
+  assert.match(prompts.system, /KEEP EVERY DETAIL/);
+  assert.match(prompts.system, /There is no length limit/);
+  assert.match(prompts.system, /"find"/);
+  assert.ok(!prompts.user.includes('### scenario'), 'empty fields are not offered for editing');
+  console.log('✓ the improve prompt asks for anchored edits, carries the critique, and sets no length cap');
 
-  const measured = measureFields(card, {
-    description: { text: 'y '.repeat(400).trim(), why: 'doubled it' },
-    first_mes: { text: 'Hi there, I am here.', why: 'dropped the macros' },
-  });
-  assert.equal(measured.description.inflated, true, 'a doubled field must be flagged as padding');
-  assert.deepEqual(measured.first_mes.lostMacros, ['{{user}}', '{{char}}'], 'losing {{user}}/{{char}} entirely must be flagged');
-  // Dropping one of three repeated {{user}}s is ordinary editing, not a defect.
-  const deduped = measureFields(card, { first_mes: { text: 'Hi {{user}}, {{char}} here.', why: 'cut a repeat' } });
-  assert.deepEqual(deduped.first_mes.lostMacros, [], 'removing a duplicated macro must not be flagged');
-  console.log('✓ padding and macros lost entirely are flagged; removing a duplicated macro is not');
+  // --- placing edits against the real text
+  const targets = editTargets(card);
+  const d = card.fields.description;
+  assert.deepEqual(locate(d, 'She is 180 cm tall.'), { start: d.indexOf('She is 180'), end: d.indexOf('She is 180') + 19 });
+  assert.equal(locate(card.fields.first_mes, 'She is quiet.').start, card.fields.first_mes.indexOf('She is quiet.'));
+  assert.match(locate(d, 'She is tall.').error, /not in the card/);
+  assert.match(locate('a. b. a.', 'a.').error, /more than once/, 'an ambiguous quote is refused, not guessed');
+  // Curly quotes and collapsed spaces still find the real text.
+  assert.ok(locate('She said “hi”  there.', 'She said "hi" there.').start === 0);
+  console.log('✓ quotes are found exactly (or through curly quotes and spacing) — missing or ambiguous ones are refused');
 
-  // no-op rewrites are dropped rather than shown as changes
-  const echoProvider = {
-    name: 'echo',
-    model: 'echo',
+  const { placed, unplaced } = placeEdits(targets, [
+    { idea: 1, field: 'description', action: 'replace', find: 'She is quiet.', text: 'She is quiet, and listens more than she speaks.' },
+    { idea: 1, field: 'description', action: 'insert_after', find: 'She wears a grey oilskin coat.', text: 'It smells of salt and lamp oil.' },
+    { idea: 1, field: 'description', action: 'replace', find: 'She is quiet. She wears', text: 'x' },          // overlaps the first
+    { idea: 1, field: 'description', action: 'replace', find: 'Nowhere in the card.', text: 'x' },             // missing
+    { idea: 1, field: 'first_mes', action: 'replace', find: 'She is quiet.', text: 'She is quiet.' },           // no-op
+    { idea: 1, field: 'personality', action: 'disable' },                                                       // not a lorebook entry
+    { idea: 1, field: 'lorebook:0', action: 'disable' },                                                        // doesn't exist
+  ]);
+  assert.equal(placed.length, 2);
+  assert.deepEqual(unplaced.map((u) => u.reason), [
+    'it overlaps another change to the same passage',
+    'the quoted passage is not in the card',
+    'it would change nothing',
+    'only lorebook entries can be switched off',
+    'it points at a part of the card that does not exist',
+  ]);
+  const after = applyEdits(d, placed);
+  assert.equal(after, 'Wren keeps the lighthouse. She is 180 cm tall. She is quiet, and listens more than she speaks. She wears a grey oilskin coat. It smells of salt and lamp oil.');
+  console.log('✓ edits change only their quoted passage; overlaps, misquotes, no-ops and impossible edits are set aside with the reason');
+
+  // With a plan, an edit to a part no chosen idea is about is refused.
+  const plan = { ideas: [{ id: 'idea-1', kind: 'extend', field: 'first_mes', title: 'Hook', change: 'End on a question.', quotes: [] }], canon: [], keepQuotes: [] };
+  const planned = buildImprovePrompts(card, critique, { plan });
+  assert.deepEqual([...planned.allowed], ['first_mes']);
+  assert.match(planned.user, /### description \(REFERENCE ONLY/, 'the description goes along as the reference, not as something to edit');
+  const strayProvider = {
+    name: 's', model: 's',
     async chat() {
-      return JSON.stringify({ fields: { personality: { text: 'terse', why: 'unchanged' } }, headline: 'nothing' });
+      return JSON.stringify({ edits: [
+        { idea: 1, field: 'description', action: 'replace', find: 'She is quiet.', text: 'She is LOUD.' },
+        { idea: 1, field: 'first_mes', action: 'insert_after', find: 'She is quiet.', text: 'Well? Are you coming in?' },
+      ], headline: 'h' });
     },
   };
-  await assert.rejects(
-    improveCard(card, critique, echoProvider),
-    /no actual changes/,
-    'a rewrite identical to the original is not a change',
-  );
-  console.log('✓ a rewrite that returns the original text unchanged is reported, not saved as an edit');
+  const out = await improveCard(card, critique, strayProvider, { plan });
+  assert.deepEqual(out.edits.map((e) => e.target), ['first_mes']);
+  assert.equal(out.unplaced[0].reason, 'it changes a part of the card no chosen idea was about');
+  assert.equal(out.edits[0].new, ' Well? Are you coming in?', 'an insert gets the space it needs');
+  assert.equal(out.edits[0].kind, 'extend');
+  console.log('✓ an edit outside the chosen ideas is refused; inserts get their spacing; each edit names its idea');
+
+  const echoProvider = {
+    name: 'echo', model: 'echo',
+    async chat() { return JSON.stringify({ edits: [{ field: 'personality', action: 'replace', find: 'terse', text: 'terse' }], headline: 'nothing' }); },
+  };
+  await assert.rejects(improveCard(card, critique, echoProvider), /no changes that could be applied[\s\S]*would change nothing/);
+  console.log('✓ when no edit can be applied, the reason is reported instead of an empty review');
 }
 
 /** Backups exist so a bad write can never be the end of hours of scoring. */
@@ -1109,9 +1150,10 @@ async function testFastScoring() {
   const fallback = await scoreCard(onlyGreetings, providerForFallback, { detail: 'fast' });
   assert.equal(fallback.overall_score, 5);
   console.log('✓ a card whose only text is in a zero-weight field is still scored, not skipped');
-  assert.match(FAST_SYSTEM_PROMPT, /never length/, 'fast mode must keep the no-length-bias rule');
+  assert.match(FAST_SYSTEM_PROMPT, /Judge depth, not length/, 'fast mode judges depth, not length — neither long nor short is a virtue');
+  assert.match(FAST_SYSTEM_PROMPT, /contradicts the description/, 'and counts contradictions between fields against the card');
   assert.match(FAST_SYSTEM_PROMPT, /Do not be generous/);
-  console.log('✓ fast mode keeps the same card prompt and the same "never judge by length" standard');
+  console.log('✓ fast mode keeps the full critique\'s standard: depth not length, contradictions count');
 }
 
 /**
@@ -1416,18 +1458,24 @@ async function testIdeasThenRewrite() {
   const { generateIdeas, improveCard } = await import('../src/improver.js');
   const { extractCardFromPng } = await import('../src/cardParser.js');
 
+  const OLD_LOOK = 'Wren is 8 feet tall with a red coat.';
   const raw = {
     spec: 'chara_card_v2', spec_version: '2.0',
     data: {
-      name: 'Wren', description: 'Wren keeps a lighthouse. ' + 'The old harbour has a long history of wrecks and smugglers. '.repeat(8),
-      personality: 'Dry, watchful.', scenario: '', first_mes: '*Wren squints at you.* "Storm\'s coming, {{user}}."',
+      name: 'Wren', description: 'Wren keeps a lighthouse. She is 180 cm tall and wears a grey oilskin coat. ' + 'The old harbour has a long history of wrecks and smugglers. '.repeat(8),
+      personality: 'Dry, watchful.', scenario: '', first_mes: '*Wren, all eight feet of her, squints at you.* "Storm\'s coming, {{user}}."',
       mes_example: '', system_prompt: 'Always stay in character.', post_history_instructions: '', alternate_greetings: [],
       creator_notes: 'Made by Anon. Use with a fantasy preset.',
-      character_book: { entries: [{ id: 1, keys: ['lamp'], content: 'The lamp never goes out.', extensions: { mine: true }, enabled: true, insertion_order: 5 }], extensions: {} },
-      extensions: { depth_prompt: { depth: 4 } },
+      character_book: { entries: [
+        { id: 1, keys: ['lamp'], content: 'The lamp never goes out.', extensions: { mine: true }, enabled: true, insertion_order: 5 },
+        { id: 2, keys: ['Wren', 'appearance'], comment: 'Wren Appearance', content: OLD_LOOK, extensions: {}, enabled: true, insertion_order: 6 },
+        { id: 3, keys: ['Wren', 'look'], comment: 'Wren Appearance', content: `${OLD_LOOK} She smells of salt.`, extensions: {}, enabled: true, insertion_order: 7 },
+      ], extensions: {} },
+      extensions: { depth_prompt: { depth: 4, prompt: 'Write in third person. Keep replies under 300 words.', role: 'system' } },
     },
   };
   const parsed = extractCardFromPng(buildFakePng(raw));
+  assert.equal(parsed.fields.character_note, 'Write in third person. Keep replies under 300 words.', "the Character's Note is read as a field");
 
   // --- ideas: checked against the card ---
   let seenIdeasPrompt = '';
@@ -1436,11 +1484,16 @@ async function testIdeasThenRewrite() {
     async chat({ user }) {
       seenIdeasPrompt = user;
       return JSON.stringify({
-        keep: ['Dry, clipped speech', 'Lighthouse keeper'],
-        keep_quotes: ['Storm\'s coming, {{user}}.', 'a line that is not in the card at all'],
+        canon: [
+          { aspect: 'look', fact: '180 cm tall', quote: 'She is 180 cm tall' },
+          { aspect: 'voice', fact: 'Clipped warnings', quote: 'Storm\'s coming, {{user}}.' },
+          { aspect: 'look', fact: 'Made-up fact', quote: 'a line that is not in the card at all' },
+          { aspect: 'nonsense', fact: 'Lighthouse keeper', quote: '' },
+        ],
         ideas: [
-          { field: 'description', title: 'Move harbour lore out', change: 'Move the wreck history to the lorebook.', why: 'Repeats.', impact: 'HIGH', risk: 'none', lorebook: true },
-          { field: 'system_prompt', title: 'Add {{original}}', change: 'Add {{original}} so the user prompt is kept.', why: 'Replaces the user prompt.', impact: 'medium', risk: 'none', lorebook: false },
+          { kind: 'fix', field: 'first_mes', title: 'Greeting height matches', change: 'Change "all eight feet of her" to match 180 cm.', why: 'Contradiction.', quotes: ['all eight feet of her', 'She is 180 cm tall', 'not really in the card'], impact: 'HIGH', risk: 'none' },
+          { kind: 'lorebook', field: 'lorebook:1', title: 'Merge the two appearance entries', change: 'Keep lorebook:1 updated to the canon look, merge what is unique from lorebook:2, switch lorebook:2 off.', why: 'Duplicates with an old look.', quotes: [], impact: 'high', risk: 'none' },
+          { kind: 'move', field: 'description', title: 'Move harbour lore out', change: 'Move the wreck history to the lorebook.', why: 'Repeats.', quotes: [], impact: 'medium', risk: 'none' },
           { field: 'not_a_field', title: 'Bogus', change: 'x', impact: 'low' },
         ],
       });
@@ -1448,11 +1501,18 @@ async function testIdeasThenRewrite() {
   };
   const ideas = await generateIdeas(parsed, null, ideasProvider);
   assert.ok(!seenIdeasPrompt.includes('Made by Anon'), 'creator notes are not the card and must not be sent');
-  assert.ok(seenIdeasPrompt.includes('Existing lorebook: 1 entry'), 'the model is told what the lorebook already holds');
-  assert.equal(ideas.ideas.length, 2, 'ideas for fields the card does not have are dropped');
+  assert.ok(seenIdeasPrompt.includes('[lorebook:1] “Wren Appearance”') && seenIdeasPrompt.includes(OLD_LOOK),
+    'the model sees each lorebook entry, by number, with its text');
+  assert.match(seenIdeasPrompt, /say much the same thing/, 'and the measured lorebook checks');
+  assert.ok(seenIdeasPrompt.includes('### character_note'), "and the Character's Note");
+  assert.deepEqual(ideas.ideas.map((i) => i.kind), ['fix', 'lorebook', 'move'], 'unknown parts of the card are dropped');
   assert.equal(ideas.ideas[0].impact, 'high');
-  assert.deepEqual(ideas.keepQuotes, ['Storm\'s coming, {{user}}.'], 'a "quote" that is not really in the card is dropped — it could not be protected');
-  console.log('✓ ideas are checked against the card: unknown fields dropped, misquotes dropped; existing lorebook shown, creator notes not');
+  assert.deepEqual(ideas.ideas[0].quotes, ['all eight feet of her', 'She is 180 cm tall'], 'quotes not really in the card are dropped');
+  assert.deepEqual(ideas.canon.map((c) => [c.aspect, c.quote]), [
+    ['look', 'She is 180 cm tall'], ['voice', 'Storm\'s coming, {{user}}.'], ['look', ''], ['other', ''],
+  ], 'a canon fact keeps its quote only if the quote is really in the card');
+  assert.deepEqual(ideas.keepQuotes, ['She is 180 cm tall', 'Storm\'s coming, {{user}}.']);
+  console.log('✓ ideas come with kinds and quotes checked against the card; the canon keeps only real quotes; lorebook and note are seen, creator notes are not');
 
   // Creator notes are the creator's profile blurb, credits and links — not the
   // character. No prompt may include them: not scoring, not either improve step.
@@ -1466,53 +1526,147 @@ async function testIdeasThenRewrite() {
   ];
   assert.ok(everyPrompt.every((p) => !(p.system + p.user).includes('Made by Anon')),
     'creator notes must never reach the model, for scoring or improving');
-  console.log('✓ creator notes are never sent — not for full or fast scoring, not for ideas, not for the rewrite');
+  console.log('✓ creator notes are never sent — not for full or fast scoring, not for ideas, not for the edits');
+  assert.ok(everyPrompt[0].user.includes(OLD_LOOK) && everyPrompt[0].user.includes('Not a field'),
+    'the full critique sees the lorebook as context, to catch contradictions');
+  assert.ok(!everyPrompt[1].user.includes(OLD_LOOK), 'fast scoring stays lean: no lorebook');
+  console.log('✓ the full critique sees the lorebook as context (to catch an outdated look); fast scoring does not');
 
   const v1 = extractCardFromPng(buildFakePng({ name: 'Flat', description: 'x '.repeat(80), first_mes: 'hi' }));
   const v1ideas = await generateIdeas(v1, null, { name: 's', model: 's', async chat() {
-    return JSON.stringify({ keep: [], keep_quotes: [], ideas: [{ field: 'description', title: 't', change: 'move it', impact: 'high', lorebook: true }] });
+    return JSON.stringify({ canon: [], ideas: [
+      { kind: 'move', field: 'description', title: 't', change: 'move it', impact: 'high' },
+      { kind: 'extend', field: 'first_mes', title: 'u', change: 'add a hook', impact: 'high' },
+    ] });
   } });
-  assert.equal(v1ideas.ideas[0].lorebook, false, 'a V1 card has no lorebook, so lorebook ideas are switched off');
+  assert.deepEqual(v1ideas.ideas.map((i) => i.kind), ['extend'], 'a V1 card has no lorebook, so move ideas are dropped');
 
-  // --- rewrite: only chosen fields are sent, others are thrown away even if returned ---
-  let seenRewritePrompt = '';
-  const rewriteProvider = {
+  // --- edits: only what the chosen ideas are about ---
+  let seenEditPrompt = '';
+  const editProvider = {
     name: 'stub', model: 'stub',
     async chat({ user }) {
-      seenRewritePrompt = user;
+      seenEditPrompt = user;
       return JSON.stringify({
-        fields: {
-          description: { text: 'Wren keeps a lighthouse.', why: 'Moved the lore out.' },
-          personality: { text: 'TOTALLY DIFFERENT PERSON', why: 'Nobody asked for this.' },
-          first_mes: { text: '*Wren looks up.* "Hello."', why: 'Nobody asked for this either.' },
-        },
-        new_lorebook_entries: [{ keys: ['harbour', 'wreck'], content: 'The old harbour has a long history of wrecks and smugglers.' }],
-        headline: 'Moved lore.',
+        edits: [
+          { idea: 1, field: 'first_mes', action: 'replace', find: 'all eight feet of her', text: 'all 180 cm of her', why: 'Match the canon height.' },
+          { idea: 2, field: 'lorebook:1', action: 'replace', find: OLD_LOOK, text: 'Wren is 180 cm tall and wears a grey oilskin coat. She smells of salt.', why: 'Canon look; merged the unique detail.' },
+          { idea: 2, field: 'lorebook:2', action: 'disable', find: '', text: '', why: 'Duplicate.' },
+          { idea: 1, field: 'description', action: 'replace', find: 'She is 180 cm tall', text: 'She is 8 feet tall', why: 'Nobody asked.' },
+          { idea: 1, field: 'personality', action: 'replace', find: 'Dry, watchful.', text: 'TOTALLY DIFFERENT', why: 'Nobody asked.' },
+        ],
+        new_lorebook_entries: [{ keys: ['harbour'], content: 'Unasked-for entry.' }],
+        headline: 'Fixed the height and merged the appearance entries.',
       });
     },
   };
-  const plan = { ideas: [ideas.ideas[0]], keep: ['Dry, clipped speech'], keepQuotes: ideas.keepQuotes };
-  const proposal = await improveCard(parsed, null, rewriteProvider, { plan });
-  assert.ok(seenRewritePrompt.includes('### description'), 'the chosen field is sent');
-  assert.ok(!seenRewritePrompt.includes('### personality') && !seenRewritePrompt.includes('### first_mes'), 'fields nobody chose a change for are not sent at all');
-  assert.ok(seenRewritePrompt.includes('Apply ONLY these') && seenRewritePrompt.includes('Dry, clipped speech') && seenRewritePrompt.includes('"Storm\'s coming, {{user}}."'),
-    'the chosen changes, the keep list and the exact quotes are all in the request');
-  assert.deepEqual(Object.keys(proposal.fields), ['description'], 'rewrites of fields nobody chose are discarded');
-  assert.equal(proposal.lorebookEntries.length, 1);
-  assert.deepEqual(proposal.lostQuotes, [], 'the protected first_mes line was untouched, so nothing is lost');
-  console.log('✓ the rewrite only sees the fields you chose; rewrites of anything else are thrown away');
+  const canon = ideas.canon.filter((c) => c.quote);
+  const plan = { ideas: ideas.ideas.slice(0, 2), canon, keepQuotes: ideas.keepQuotes };
+  const proposal = await improveCard(parsed, null, editProvider, { plan });
+  assert.ok(seenEditPrompt.includes('### first_mes') && seenEditPrompt.includes('### lorebook:1') && seenEditPrompt.includes('### lorebook:2'),
+    'the parts the ideas are about are sent — a lorebook duplicate reaches its other copy');
+  assert.ok(seenEditPrompt.includes('### description (REFERENCE ONLY'), 'the description is the reference, not an edit target');
+  assert.ok(!seenEditPrompt.includes('### personality'), 'parts nobody chose a change for are not sent');
+  assert.match(seenEditPrompt, /Canon — what makes this character itself[\s\S]*look: 180 cm tall \(“She is 180 cm tall”\)/);
+  assert.deepEqual(proposal.edits.map((e) => `${e.action}@${e.target}`), ['replace@first_mes', 'replace@lorebook:1', 'disable@lorebook:2']);
+  assert.deepEqual(proposal.unplaced.map((u) => u.target), ['description', 'personality'], 'edits outside the chosen ideas are refused');
+  assert.equal(proposal.edits[2].kind, 'lorebook');
+  assert.equal(proposal.lorebookEntries.length, 0, 'new entries are only accepted when a chosen idea is a move');
+  assert.ok(proposal.rest.includes('Dry, watchful.'), 'the rest of the card comes back for the "is this detail still anywhere" check');
+  console.log('✓ the edits stay inside the chosen ideas: a fix in the greeting, a merged lorebook entry and its duplicate switched off — nothing else');
+}
 
-  // a keep-quote that disappears from a chosen field is flagged
-  const lossy = await improveCard(parsed, null, { name: 's', model: 's', async chat() {
-    return JSON.stringify({ fields: { first_mes: { text: '*Wren looks up.* "Hello there."', why: 'x' } }, new_lorebook_entries: [], headline: 'x' });
-  } }, { plan: { ideas: [{ field: 'first_mes', title: 't', change: 'c', lorebook: false }], keep: [], keepQuotes: ideas.keepQuotes } });
-  assert.deepEqual(lossy.lostQuotes, ['Storm\'s coming, {{user}}.'], 'losing a protected line is reported');
-  console.log('✓ a rewrite that drops one of the card\'s protected exact lines is flagged');
+/** Saving edits: the Character's Note, lorebook updates, and the flat copy SillyTavern exports. */
+async function testWriterLorebookAndNote() {
+  const { applyFieldsToRaw } = await import('../src/cardWriter.js');
+  const raw = {
+    name: 'Wren', description: 'old', first_mes: 'hi', character_book: { entries: [{ content: 'A' }, { content: 'B', disable: false }] },
+    spec: 'chara_card_v2', spec_version: '2.0',
+    data: {
+      name: 'Wren', description: 'old', first_mes: 'hi', alternate_greetings: [], extensions: { depth_prompt: { depth: 2, prompt: 'p', role: 'system' }, custom: 1 },
+      character_book: { entries: [{ id: 1, content: 'A', keys: ['a'], extensions: { keep: 1 } }, { id: 2, content: 'B', keys: ['b'], disable: false, enabled: true, extensions: {} }], extensions: {} },
+    },
+  };
+  const out = applyFieldsToRaw(raw, {
+    fields: { description: 'new', character_note: 'Write in third person.' },
+    lorebookUpdates: [{ index: 0, content: 'A, merged with B', expect: 'A' }, { index: 1, enabled: false, expect: 'B' }],
+  });
+  assert.equal(out.data.description, 'new');
+  assert.equal(out.description, 'new', 'the flat top-level copy SillyTavern exports is kept in step');
+  assert.deepEqual(out.data.extensions.depth_prompt, { depth: 2, prompt: 'Write in third person.', role: 'system' }, "the note's depth and role are kept");
+  assert.equal(out.data.extensions.custom, 1);
+  assert.equal(out.data.character_book.entries[0].content, 'A, merged with B');
+  assert.deepEqual(out.data.character_book.entries[0].extensions, { keep: 1 }, 'everything else about an entry is kept');
+  assert.equal(out.data.character_book.entries[1].enabled, false);
+  assert.equal(out.data.character_book.entries[1].disable, true, "SillyTavern's own flag is kept in step");
+  assert.equal(out.data.character_book.entries.length, 2, 'entries are switched off, never deleted');
+  assert.equal(out.character_book.entries[0].content, 'A, merged with B', 'the top-level lorebook copy follows');
+  assert.equal(raw.data.description, 'old', 'the original object is not mutated');
+  assert.throws(() => applyFieldsToRaw(raw, { lorebookUpdates: [{ index: 0, content: 'x', expect: 'Something else' }] }), /has changed since it was reviewed/);
+  assert.throws(() => applyFieldsToRaw({ name: 'Flat', description: 'd' }, { fields: { character_note: 'x' } }), /V1 format/);
+  console.log("✓ saving writes the Character's Note, updates or switches off lorebook entries (never deletes), and keeps SillyTavern's flat copy in step");
+}
 
-  // lorebook entries are ignored unless a chosen idea asked for a move
-  const noMove = await improveCard(parsed, null, rewriteProvider, { plan: { ideas: [{ ...ideas.ideas[0], lorebook: false }], keep: [], keepQuotes: [] } });
-  assert.equal(noMove.lorebookEntries.length, 0, 'entries nobody asked for are not accepted');
-  console.log('✓ lorebook entries are only accepted when you chose a lorebook move');
+/**
+ * The review step's live checks (public/cardEdits.js), loaded the way the page
+ * loads them. The point of the whole design: a change that would remove a
+ * detail found nowhere else starts OFF; a merge, a move or a fix does not.
+ */
+async function testCardEditsReview() {
+  const vm = await import('node:vm');
+  const box = {};
+  box.globalThis = box;
+  vm.createContext(box);
+  vm.runInContext(await readFile(path.join(PROJECT_ROOT, 'public/cardEdits.js'), 'utf8'), box);
+  const C = box.CardEdits;
+
+  const desc = 'Wren keeps the lighthouse. She wears a long grey oilskin coat with brass buttons and a red wool scarf. She is quiet. She trusts the sea. She is quiet and watchful.';
+  const at = (s, find) => ({ start: desc.indexOf(find), end: desc.indexOf(find) + find.length, old: find });
+  const part = {
+    target: 'description', before: desc, handEdited: false,
+    edits: [
+      // The trim that kills the character: the outfit loses its details.
+      { ...at(desc, 'She wears a long grey oilskin coat with brass buttons and a red wool scarf.'), action: 'replace', new: 'She wears a grey coat.', kind: 'trim', order: 0 },
+      // A combine: two "quiet" sentences become one that keeps both details.
+      { ...at(desc, 'She is quiet. '), action: 'replace', new: '', kind: 'combine', order: 1 },
+      { ...at(desc, 'She is quiet and watchful.'), action: 'replace', new: 'She is quiet and watchful, and listens more than she speaks.', kind: 'combine', order: 2 },
+      // An extension: adds only.
+      { start: desc.indexOf('She trusts the sea.') + 19, end: desc.indexOf('She trusts the sea.') + 19, old: '', action: 'insert_after', new: ' She talks to the gulls.', kind: 'extend', order: 3 },
+    ],
+  };
+  const greeting = '*Wren, all 8 feet of her, looks up.*';
+  const fix = { target: 'first_mes', before: greeting, handEdited: false, edits: [
+    { start: 6, end: 23, old: 'all 8 feet of her', action: 'replace', new: 'all 180 cm of her', kind: 'fix', order: 0 },
+  ] };
+  const dupA = { target: 'lorebook:1', before: 'Wren is tall and wears a grey coat.', handEdited: false, edits: [] };
+  const dupB = { target: 'lorebook:2', before: 'Wren is tall and wears a grey coat. She hums sea shanties.', handEdited: false, edits: [
+    { start: 0, end: 0, old: '', new: '', action: 'disable', kind: 'lorebook', order: 0 },
+  ] };
+  const parts = [part, fix, dupA, dupB];
+  C.defaultUses(parts, 'Wren is 180 cm tall.');
+  assert.deepEqual(part.edits.map((e) => e.use), [false, true, true, true], 'only the outfit trim starts off');
+  assert.equal(fix.edits[0].use, true, 'a fix starts on — changing that detail is its point');
+  assert.equal(dupB.edits[0].use, false, 'switching off a "duplicate" that holds a unique detail starts off');
+  part.edits[0].use = true; // judged as if it were on, like the page does
+  const lost = C.lostDetails(part.edits[0].old, C.wholeCard(parts, ''));
+  part.edits[0].use = false;
+  for (const t of ['oilskin', 'brass', 'buttons', 'red', 'wool', 'scarf']) assert.ok(lost.includes(t), `the check names what the trim would remove: ${t}`);
+  assert.ok(!lost.includes('grey'), 'a detail still in the card is not reported lost');
+  console.log(`✓ a change that would remove details starts off and names them (${lost.join(', ')}); merges, additions and fixes start on`);
+
+  // Merge the unique line into the kept entry, and the switch-off becomes safe.
+  dupA.edits.push({ start: dupA.before.length, end: dupA.before.length, old: '', new: ' She hums sea shanties.', action: 'insert_after', kind: 'lorebook', order: 0 });
+  C.defaultUses(parts, 'Wren is 180 cm tall.');
+  assert.equal(dupB.edits[0].use, true, 'once its unique detail is merged into the kept entry, switching the duplicate off loses nothing');
+  console.log('✓ a duplicate lorebook entry can be switched off safely once what was unique in it lives in the kept entry');
+
+  part.edits[0].use = false;
+  const final = C.compose(part.before, part.edits);
+  assert.equal(final, 'Wren keeps the lighthouse. She wears a long grey oilskin coat with brass buttons and a red wool scarf. She trusts the sea. She talks to the gulls. She is quiet and watchful, and listens more than she speaks.');
+  const sp = C.spans(part.before, part.edits);
+  assert.equal(sp.old.map((x) => x.text).join(''), part.before, 'the "card now" column is exactly the original');
+  assert.equal(sp.new.map((x) => x.text).join(''), final, 'the "after" column is exactly what will be saved');
+  console.log('✓ the final text is the original with exactly the allowed changes; the side-by-side columns match both');
 }
 
 /**
