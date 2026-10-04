@@ -590,7 +590,6 @@ The rubric sent to the model, verbatim:
 > 4. **Suggestions** - Concrete changes
 >
 > Then provide:
-> - **Overall Score** (weighted average)
 > - **Top 3 Priority Improvements**
 > - **Summary**
 >
@@ -600,10 +599,23 @@ The rubric sent to the model, verbatim:
 dashboard renders it back out in this exact structure.)
 
 Fields scored: `description`, `personality`, `scenario`, `first_mes`, `mes_example`,
-`system_prompt`, `post_history_instructions`, `alternate_greetings` — whichever of these
-are actually non-empty on a given card. The overall score is a weighted average across
-whichever fields are present (weights in `config.json`, defaults favor `description` and
-`first_mes` since those matter most for how the character plays).
+`system_prompt`, `post_history_instructions`, the Character's Note, `alternate_greetings`
+— whichever of these are actually non-empty on a given card. The **overall score is
+computed by the tool**, as a weighted average of the field scores (weights in
+`config.json`; defaults favour `description` and `first_mes` since those matter most for
+how the character plays). The model is never asked to do that arithmetic — it's where
+models slip, and across thousands of cards the slips become noise in the ranking.
+
+**What the model is told, read from its side.** Every request says what each field is
+and how SillyTavern uses it ("first_mes — the opening message: the first thing {{user}}
+reads", "the Character's Note: inserted into the chat 4 messages from the end, on every
+reply"), and that `{{char}}`/`{{user}}`/`{{original}}` are macros, not placeholders left
+unfilled — so a greeting is judged as a greeting, and nothing is marked down for using
+macros. The critique writes its reasons before each score, and quotes the words each
+weakness is about. The ideas step is told what already works (to protect it) and that
+each idea will later be carried out on its own, so it has to stand alone. The edit step
+is told that inexact quotes are discarded and detail-losing edits start off. None of
+this depends on the editable instructions, so it holds even if you rewrite them.
 
 ## Setup
 

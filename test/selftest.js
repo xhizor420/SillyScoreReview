@@ -438,6 +438,7 @@ async function main() {
   await testChangePicker();
   await testWriterNoteAndFlatCopy();
   await testCreatorNotesNeverSent();
+  await testWhatTheModelSees();
   await testCardEditsReview();
   await testTwoPassAndRawReplies();
 
@@ -1121,7 +1122,10 @@ async function testFastScoring() {
 
   assert.equal(fast.fields.description.score, 8, 'fast mode must still produce a per-field score');
   assert.equal(fast.fields.first_mes.score, 6);
-  assert.equal(fast.overall_score, 7.4);
+  // The model said 7.4; the overall is computed from its field scores instead
+  // (8 × 0.3 + 6 × 0.25) / 0.55 = 7.09 — no arithmetic left to the model.
+  assert.equal(fast.overall_score, 7.1, 'the overall is computed in code from the field scores and weights');
+  assert.equal(full.overall_score, 7.1, 'the same for a full critique');
   assert.equal(fast.brief, true, 'a fast result must be marked so the UI can offer a full rescore');
   assert.equal(fast.fields.description.strengths, '', 'fast mode returns no critique text');
   assert.equal(full.brief, undefined, 'a full result is not marked brief');
@@ -1623,6 +1627,45 @@ async function testCreatorNotesNeverSent() {
   }
   assert.ok(all.every((t) => t.includes('Third person.')), "the Character's Note (part of how the card plays) is sent");
   console.log('✓ creator notes (V2, flat copy, SillyTavern creatorcomment), creator name and version are never sent — in any scoring, ideas or edit prompt');
+}
+
+/**
+ * The requests read from the model's side: every field says what it is, the
+ * macros are explained, reasons come before scores, no arithmetic is asked
+ * for, and each step is told what happens to its answer.
+ */
+async function testWhatTheModelSees() {
+  const { extractCardFromJson } = await import('../src/cardParser.js');
+  const { buildScoringPrompts, parseScoreResponse } = await import('../src/scorer.js');
+  const { buildIdeasPrompts, buildImprovePrompts } = await import('../src/improver.js');
+  const card = extractCardFromJson(Buffer.from(JSON.stringify({
+    spec: 'chara_card_v2', spec_version: '2.0',
+    data: {
+      name: 'Wren', description: 'Wren keeps a lighthouse.', first_mes: '*She looks up.* "Storm\'s coming, {{user}}."',
+      mes_example: '<START>\n{{char}}: "Tea?"', extensions: { depth_prompt: { depth: 2, prompt: 'Third person.', role: 'system' } },
+    },
+  })));
+  const full = buildScoringPrompts(card, undefined, { detail: 'full' });
+  const fast = buildScoringPrompts(card, undefined, { detail: 'fast' });
+  for (const p of [full, fast]) {
+    assert.match(p.user, /^### first_mes — the opening message: the first thing \{\{user\}\} reads/m, 'each field says what it is');
+    assert.match(p.user, /^### character_note — SillyTavern's Character's Note: an instruction inserted into the chat 2 messages from the end/m, "with this card's own note depth");
+    assert.match(p.user, /\{\{user\}\} with the user's name at chat time.*not placeholders left unfilled/, 'the macros are explained');
+    assert.doesNotMatch(p.user, /weight \d/, 'no weights to do arithmetic with');
+    assert.doesNotMatch(p.system, /"overall_score"/, 'the overall is not asked of the model');
+  }
+  assert.ok(full.system.indexOf('"suggestions"') < full.system.indexOf('"score"'), 'reasons come before the score');
+  assert.match(full.system, /Quote the few words each weakness is about/);
+  const ideas = buildIdeasPrompts(card, { fields: { first_mes: { score: 7, strengths: 'Strong hook.', weaknesses: 'w' } } });
+  assert.match(ideas.user, /Rating of this field: scored 7\/10; strengths: Strong hook\./, 'the ideas step sees what to protect');
+  assert.match(ideas.system, /WHAT HAPPENS NEXT[\s\S]*sees only the card, the canon and that idea/);
+  assert.match(buildImprovePrompts(card, null).system, /WHAT HAPPENS NEXT[\s\S]*not an exact, unique quote from that field is discarded/);
+  assert.match(buildImprovePrompts(card, null).user, /^### first_mes — the opening message/m);
+  // the overall: computed from field scores; the model's own only when it gave none
+  assert.equal(parseScoreResponse('{"fields":{"description":9,"first_mes":5},"overall_score":2}').overall_score, 7.2);
+  assert.equal(parseScoreResponse('{"fields":{},"overall_score":6.5}').overall_score, 6.5);
+  assert.equal(parseScoreResponse('{"fields":{}}'), null, 'no scores at all is an unusable answer');
+  console.log('✓ the model is told what each field is and what the macros mean, gives reasons before scores, does no arithmetic, and each step knows what happens to its answer');
 }
 
 /** Saving edits: the Character's Note, and the flat copy SillyTavern's JSON exports carry. */

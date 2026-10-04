@@ -1,4 +1,5 @@
 import { SCORABLE_FIELDS } from './cardParser.js';
+import { fieldHeading, MACRO_NOTE } from './fieldGuide.js';
 import { DEFAULT_PROMPTS, systemPrompt } from './prompts.js';
 import { extractJsonObject } from './jsonExtract.js';
 import { ask, unusableAnswerError } from './scorer.js';
@@ -41,6 +42,8 @@ function critiqueFor(result, field) {
   if (!f) return null;
   const bits = [];
   if (Number.isFinite(f.score)) bits.push(`scored ${f.score}/10`);
+  // Strengths too: what already works is what the next step must not break.
+  if (f.strengths) bits.push(`strengths: ${f.strengths}`);
   if (f.weaknesses) bits.push(`weaknesses: ${f.weaknesses}`);
   if (f.suggestions) bits.push(`suggestions: ${f.suggestions}`);
   return bits.length ? bits.join('; ') : null;
@@ -230,7 +233,7 @@ export function applyEdits(text, edits) {
 
 /** The prompt pair for the ideas step. */
 export function buildIdeasPrompts(card, result, { prompts = {}, draftInstructions = null } = {}) {
-  const parts = [`Character name: ${card.name}`, ''];
+  const parts = [`Character name: ${card.name}`, '', MACRO_NOTE, ''];
   if (result?.summary) parts.push(`Rating summary: ${result.summary}`, '');
   if (Number.isFinite(result?.overall_score)) parts.push(`Overall score: ${result.overall_score}/10`, '');
   if (result?.top_priority_improvements?.length) {
@@ -244,7 +247,7 @@ export function buildIdeasPrompts(card, result, { prompts = {}, draftInstruction
     if (field === 'character_note' && !isV2(card)) continue;
     editable.push(field);
     const critique = critiqueFor(result, field);
-    parts.push(`### ${field}`);
+    parts.push(fieldHeading(card, field));
     if (critique) parts.push(`Rating of this field: ${critique}`);
     parts.push(text.trim(), '');
   }
@@ -372,7 +375,7 @@ function planTargets(plan, targets) {
 /** The exact prompt pair an improve request sends, so tests and diagnostics can reuse it. */
 export function buildImprovePrompts(card, result, { prompts = {}, draftInstructions = null, plan = null, fields = null } = {}) {
   const targets = editTargets(card);
-  const parts = [`Character name: ${card.name}`, ''];
+  const parts = [`Character name: ${card.name}`, '', MACRO_NOTE, ''];
   let allowed;
 
   if (plan?.ideas?.length) {
@@ -413,11 +416,11 @@ export function buildImprovePrompts(card, result, { prompts = {}, draftInstructi
   for (const target of allowed) {
     const t = targets.get(target);
     if (t.empty) {
-      parts.push(`### ${target} (EMPTY — fill it with one "write" edit)`, '');
+      parts.push(fieldHeading(card, target, ' (EMPTY — fill it with one "write" edit)'), '');
       continue;
     }
     const critique = critiqueFor(result, target);
-    parts.push(`### ${target}`);
+    parts.push(fieldHeading(card, target));
     if (critique) parts.push(`Critique of this field: ${critique}`);
     parts.push(t.text, '');
   }

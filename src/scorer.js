@@ -1,4 +1,5 @@
 import { SCORABLE_FIELDS } from './cardParser.js';
+import { fieldHeading, MACRO_NOTE } from './fieldGuide.js';
 import { DEFAULT_PROMPTS, systemPrompt, promptHash } from './prompts.js';
 import { extractJsonObject } from './jsonExtract.js';
 
@@ -66,7 +67,7 @@ export function buildScoringPrompts(card, weights = DEFAULT_WEIGHTS, { detail = 
 const WORTH_FILLING = ['scenario', 'first_mes', 'mes_example', 'alternate_greetings', 'character_note'];
 
 function buildUserPrompt(card, weights, { skipZeroWeight = false, listEmpty = false } = {}) {
-  const parts = [`Character name: ${card.name}`, ''];
+  const parts = [`Character name: ${card.name}`, '', MACRO_NOTE, ''];
   for (const field of SCORABLE_FIELDS) {
     const text = card.fields[field];
     if (!text || !text.trim()) continue;
@@ -75,10 +76,10 @@ function buildUserPrompt(card, weights, { skipZeroWeight = false, listEmpty = fa
     // but in a scores-only pass it is pure cost — and on cards with several
     // greetings it is often the largest field in the prompt.
     if (skipZeroWeight && (weights[field] ?? 0) === 0) continue;
-    // No token counts: the card is judged on quality, and a size label next to
-    // each field invites the model to judge by length instead.
-    const weight = weights[field] ?? 0;
-    parts.push(`### ${field} (weight ${weight})`);
+    // Each field says what it is for, so it is judged as what it is (a
+    // greeting as a greeting). No token counts — a size label invites judging
+    // by length — and no weights: the overall is computed here, not by the model.
+    parts.push(fieldHeading(card, field));
     parts.push(text.trim());
     parts.push('');
   }
@@ -178,9 +179,17 @@ export function parseScoreResponse(raw, weights = DEFAULT_WEIGHTS) {
     };
   }
 
-  const overall = Number.isFinite(parsed.overall_score)
-    ? Math.round(parsed.overall_score * 10) / 10
-    : recomputeOverall(fields, weights);
+  // The overall is the weighted average of the field scores, computed here —
+  // not asked of the model. Arithmetic inside a JSON answer is where models
+  // slip, and across a few thousand cards those slips become noise in the
+  // ranking. Computing it also means your field weights are what count.
+  // Only a reply with no usable field score at all falls back to the model's
+  // own overall (and with neither, the answer is unusable).
+  const scored = Object.values(fields).some((f) => Number.isFinite(f.score));
+  const overall = scored
+    ? recomputeOverall(fields, weights)
+    : Number.isFinite(parsed.overall_score) ? Math.round(Math.max(1, Math.min(10, parsed.overall_score)) * 10) / 10 : null;
+  if (overall == null) return null;
 
   return {
     fields,

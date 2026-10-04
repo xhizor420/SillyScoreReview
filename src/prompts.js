@@ -90,27 +90,31 @@ Rate this character card on a scale of 1-10 for each field provided.
 For each field:
 1. Score (1-10)
 2. Strengths - What works well
-3. Weaknesses - What keeps it from 10/10 (name contradictions with both versions)
+3. Weaknesses - What keeps it from 10/10. Quote the few words each weakness is about, and name contradictions \
+with both versions.
 4. Suggestions - Concrete changes that would take this field to 10/10 while keeping the character
 
 Then provide:
-- Overall Score (weighted average)
 - Top 3 Priority Improvements (the changes that would raise the card most)
 - Summary
+(The overall score is computed from your field scores and the field weights; you don't calculate it.)
 
-Be specific and actionable — one or two sentences per entry.`;
+Before answering, check: every weakness points at specific words in the card; every contradiction names both \
+versions; every suggestion is concrete enough to carry out and keeps the character; no field was marked down for \
+its length alone. Be specific and actionable — one or two sentences per entry.`;
 
-const FULL_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary before or after) matching \
-exactly this shape:
+const FULL_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary before or after) \
+in exactly this shape. Within each field, write the critique first and the score last, so the score follows from \
+your reasons:
 {
   "fields": {
-    "<field_name>": { "score": <1-10 integer>, "strengths": "<string>", "weaknesses": "<string>", "suggestions": "<string>" }
+    "<field_name>": { "strengths": "<string>", "weaknesses": "<string>", "suggestions": "<string>", "score": <1-10 integer> }
   },
-  "overall_score": <number 1-10, one decimal>,
   "top_priority_improvements": ["<string>", "<string>", "<string>"],
   "summary": "<2-4 sentence summary>"
 }
-Include an entry in "fields" for every field given to you below, using the exact field name shown.`;
+Include an entry in "fields" for every field given to you below, named exactly as the word right after "###". Do not \
+include an overall score: it is computed from your field scores.`;
 
 const FAST_INSTRUCTIONS = `You are a demanding, experienced editor of SillyTavern character cards. You judge \
 how well each field will make an LLM play this character vividly and consistently, scene after scene.
@@ -127,10 +131,10 @@ Apply exactly the standard you would if you were writing out the full critique. 
 used to find the best cards and decide which get deleted.`;
 
 const FAST_FORMAT = `Respond with ONLY a single valid JSON object, no markdown fences and no commentary, in exactly this shape:
-{"fields": {"<field_name>": <1-10 integer>}, "overall_score": <number 1-10, one decimal>}
+{"fields": {"<field_name>": <1-10 integer>}}
 
-Include every field name given to you below, spelled exactly as shown. Output nothing else — no strengths, no \
-weaknesses, no suggestions, no summary.`;
+Include every field given to you below, named exactly as the word right after "###". Output nothing else — no \
+strengths, no weaknesses, no suggestions, no summary, and no overall score (it is computed from your field scores).`;
 
 const IMPROVE_INSTRUCTIONS = `You are a senior editor for SillyTavern character cards. The owner has \
 chosen specific changes. You make exactly those changes as precise edits to the card's existing text. You are \
@@ -160,7 +164,12 @@ or one line — copied character for character.
 most a short {{user}}: line to prompt them. Alternate greetings are complete, distinct openings in different \
 situations, separated by a line containing only ---, each in the same style as the first message and never acting \
 for {{user}}. A Character's Note is short, direct instructions to the model.
-7. CARD TEXT ONLY. No notes, labels or commentary inside the text.`;
+7. CARD TEXT ONLY. No notes, labels or commentary inside the text.
+
+WHAT HAPPENS NEXT. Each edit is shown to the owner on its own, beside the original, and checked in code first: an \
+edit whose "find" is not an exact, unique quote from that field is discarded; an edit to a field no chosen change is \
+about is discarded; an edit that removes a detail found nowhere else in the card is flagged and starts switched off. \
+So quote exactly, keep every detail, stay inside the chosen changes — and make each edit worth allowing on its own.`;
 
 const IMPROVE_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary) in exactly this shape:
 {
@@ -227,7 +236,13 @@ near-copy of first_mes.
 - The first message and example dialogue should not speak, act or decide for {{user}}.
 
 For each idea, "quotes" lists the exact passages it changes or relies on, copied from the card. Rate impact \
-honestly — how much closer it brings the card to a 10/10 — and say plainly how an idea could change the card's feel.`;
+honestly — how much closer it brings the card to a 10/10 — and say plainly how an idea could change the card's feel.
+
+WHAT HAPPENS NEXT. The owner reads the ideas and ticks the ones they want. Each ticked idea is then carried out by \
+an editor who sees only the card, the canon and that idea — not your reasoning, not the other ideas. So every idea \
+must stand alone: say exactly what to change, where (quote it), and what the result should achieve. Never write \
+"as above" or "see idea 2". An idea the owner can't judge from its title and change alone won't be ticked. The \
+strengths named in the rating are what already works: protect them.`;
 
 const IDEAS_FORMAT = `Respond with ONLY a single valid JSON object (no markdown fences, no commentary) in exactly this shape:
 {
