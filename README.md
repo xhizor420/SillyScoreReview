@@ -163,13 +163,22 @@ Before saving, try an edit on one card:
 The editor also warns you about edits that are allowed but probably not meant: writing
 your own JSON format (it would conflict with the locked one), asking fast mode for written
 feedback (it never returns any), lenient grading (it bunches scores up, which makes
-culling harder), or instructions long enough to noticeably slow down a big scan.
+culling harder).
 
-**Changing a prompt never rescores anything by itself.** Every score remembers which
-prompt produced it, so after you save, an **older prompt** tile appears with a count, and
-the filter **Scored with an older prompt** shows just those cards — rescore them with
-**Select all shown → Fast score** or **Full critique**, or leave them. **Reset to default** puts the
-built-in prompt back. Edits are saved to `config.json` under `prompts`.
+**Changing a prompt never rescores anything by itself** — but bringing everything up to
+date is one click. Every score remembers which prompt produced it, so after a change a
+notice appears under the stats: *"312 scores were made with an older version of the
+prompts (300 fast, 12 full critiques)"* with an **Update all** button. It redoes each of
+them **the way it was made** — a fast score stays a fast score, a full critique stays a
+full critique — backs up your scores first, and a card whose update fails keeps its old
+score. Press it again later and it has nothing to do. (To pick and choose instead, the
+filter **Scored with an older prompt** shows just those cards.)
+
+**Improve with AI** does this for you per card: if a card's critique was written with an
+older prompt, it writes a fresh one before drafting ideas.
+
+**Reset to default** puts the built-in prompt back. Edits are saved to `config.json` under
+`prompts`.
 
 ## Improving a card
 
@@ -275,8 +284,8 @@ steps' prompts are editable in **Prompts** (*Improvement ideas* and *Improve car
 
 **After updating:** the default prompts changed (a 10/10 bar, depth not length,
 consistency across the card), so scores made with the old defaults show as **older
-prompt**. Nothing is rescored
-by itself — filter *Scored with an older prompt* and rescore what you want. If you pasted
+prompt**. Press **Update all** in the notice under the stats to bring them up to date
+(each redone the way it was made). If you pasted
 your own prompt into Prompts, yours is kept; press **Reset to default** on a tab to try the
 new one.
 

@@ -716,6 +716,17 @@ body.select-mode .card-checkbox { width: 26px; height: 26px; }
   /* Sort and filter stay side by side: two short rows beat two tall ones. */
 }
 
+/* ---- "Update old scores": shown when the prompts changed since some cards were scored ---- */
+.stale-notice {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin: 10px 20px 0; padding: 8px 12px; border-radius: 8px; font-size: 13px;
+  background: rgba(224,178,58,0.10); border: 1px solid rgba(224,178,58,0.45);
+}
+@media (max-width: 760px) {
+  .stale-notice { margin: 8px 12px 0; }
+  .stale-notice button { width: 100%; min-height: 42px; }
+}
+
 /* ---- Improve with AI: kinds of change, the canon, and the change review ---- */
 .pill.kind-pill { font-weight: 700; letter-spacing: 0.01em; }
 .pill.kind-fix { background: rgba(224,178,58,0.16); color: var(--yellow); }

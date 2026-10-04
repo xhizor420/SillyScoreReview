@@ -24,6 +24,9 @@ const els = {
   sortBy: document.getElementById('sortBy'),
   filterBy: document.getElementById('filterBy'),
   fastScanBtn: document.getElementById('fastScanBtn'),
+  staleNotice: document.getElementById('staleNotice'),
+  staleText: document.getElementById('staleText'),
+  updateStaleBtn: document.getElementById('updateStaleBtn'),
   critiqueScanBtn: document.getElementById('critiqueScanBtn'),
   rescanAllBtn: document.getElementById('rescanAllBtn'),
   trashToggleBtn: document.getElementById('trashToggleBtn'),
@@ -301,6 +304,23 @@ async function loadCards() {
 }
 
 /**
+ * When the prompts change, existing scores are left alone — but you shouldn't
+ * have to hunt for them. One notice, one button: every score made with an
+ * older prompt is redone the way it was made (fast stays fast, a full
+ * critique stays a full critique).
+ */
+function renderStaleNotice() {
+  const stale = state.cards.filter((c) => c.promptStale);
+  els.staleNotice.classList.toggle('hidden', stale.length === 0);
+  if (!stale.length) return;
+  const fast = stale.filter((c) => c.brief).length;
+  const full = stale.length - fast;
+  const kinds = [fast && `${fast.toLocaleString()} fast`, full && `${full.toLocaleString()} full critique${full === 1 ? '' : 's'}`].filter(Boolean).join(', ');
+  els.staleText.textContent = `${stale.length.toLocaleString()} score${stale.length === 1 ? ' was' : 's were'} made with an older version of the prompts (${kinds}).`;
+  els.updateStaleBtn.textContent = `Update ${stale.length === 1 ? 'it' : `all ${stale.length.toLocaleString()}`}`;
+}
+
+/**
  * The numbers a culling session starts from, as a row of stat tiles. Each one
  * that names a set of cards is also a shortcut to that set.
  */
@@ -312,6 +332,7 @@ function renderStats() {
   const unscored = state.cards.filter((c) => c.overallScore == null && !c.error).length;
   const stale = state.cards.filter((c) => c.promptStale).length;
   const avg = scored ? (scoredCards.reduce((sum, c) => sum + c.overallScore, 0) / scored).toFixed(1) : '—';
+  renderStaleNotice();
 
   const tiles = [
     { value: total.toLocaleString(), label: 'cards', filter: 'all' },
@@ -884,7 +905,7 @@ function renderScanPanel(job) {
     { label: 'ETA', value: job.stopping ? 'stopping' : job.state === 'paused' ? 'paused' : job.state === 'waiting' ? 'waiting' : job.status === 'running' ? fmtDuration(job.etaMs) : job.status === 'stopped' ? 'stopped' : 'done' },
     ...(job.pacing?.enabled ? [{ label: 'Pace', value: `${job.pacing.currentRpm}/min`, cls: job.pacing.slowedDown ? 'is-error' : '' }] : []),
     { label: 'Elapsed', value: fmtDuration(job.elapsedMs) },
-    { label: 'Mode', value: job.detail === 'fast' ? 'fast' : 'full' },
+    { label: 'Mode', value: job.detail === 'same' ? 'as before' : job.detail === 'fast' ? 'fast' : 'full' },
   ];
   els.scanStats.innerHTML = stats
     .map((s) => `<div class="scan-stat ${s.cls || ''}"><b>${escapeHtml(String(s.value))}</b><span>${escapeHtml(s.label)}</span></div>`)
@@ -956,7 +977,7 @@ async function pollJob(jobId) {
     alert(
       `Scan stopped. ${job.done} card${job.done === 1 ? '' : 's'} scored${job.errors ? `, ${job.errors} failed` : ''}` +
       `${job.skipped ? `, ${job.skipped} not started` : ''}.\n\n` +
-      `Every score that finished is saved. "${job.detail === 'fast' ? 'Fast score' : 'Full critique'}" picks up exactly where this left off.`,
+      `Every score that finished is saved. "${scanButtonName(job.detail)}" picks up exactly where this left off.`,
     );
     return;
   }
@@ -976,10 +997,15 @@ async function pollJob(jobId) {
     }
     alert(
       `${job.errors} of ${job.done + job.errors} cards failed to score.${why}\n\n` +
-      `Failed cards are not lost — "${job.detail === 'fast' ? 'Fast score' : 'Full critique'}" retries them.\n\n` +
+      `Failed cards are not lost — "${scanButtonName(job.detail)}" retries them.\n\n` +
       `For a live check against your API, run:  node src/cli.js doctor`,
     );
   }
+}
+
+/** The button that starts (and resumes) a scan of this kind. */
+function scanButtonName(detail) {
+  return detail === 'same' ? 'Update old scores' : detail === 'fast' ? 'Fast score' : 'Full critique';
 }
 
 async function startBatch(body) {
@@ -1096,6 +1122,17 @@ els.fastScanBtn.addEventListener('click', () => {
     return;
   }
   startBatch({ scope: 'unscored', detail: 'fast' });
+});
+els.updateStaleBtn.addEventListener('click', () => {
+  const stale = state.cards.filter((c) => c.promptStale);
+  if (!stale.length) return;
+  const fast = stale.filter((c) => c.brief).length;
+  if (stale.length > 50 && !confirm(
+    `Update ${stale.length.toLocaleString()} scores to the current prompts?\n\n` +
+    `Each is redone the way it was made: ${fast.toLocaleString()} fast, ${(stale.length - fast).toLocaleString()} full critique. ` +
+    'Your current scores are backed up first, and a card keeps its old score if its update fails.',
+  )) return;
+  startBatch({ scope: 'stale', rescore: true, detail: 'same' });
 });
 els.critiqueScanBtn.addEventListener('click', () => {
   const unscored = state.cards.filter((c) => c.overallScore == null).length;
@@ -1583,9 +1620,13 @@ async function startImprove(id, name) {
   const known = state.cards.find((c) => c.id === id);
   let critiqueFailed = null;
   let critiqued = false;
-  if (!known || known.overallScore == null || known.brief) {
+  // A critique written with an older prompt is redone too: the ideas should
+  // aim at what the current prompt finds, not what an old one did.
+  if (!known || known.overallScore == null || known.brief || known.promptStale) {
     els.modalBody.innerHTML = `<h2>Improve: ${escapeHtml(name)}</h2>${stepper(1)}
-      <p class="editor-working">Writing the full critique first, so the ideas can aim at what it finds…</p>
+      <p class="editor-working">${known?.promptStale && !known.brief
+        ? 'This card\'s critique was written with an older prompt — writing a fresh one first…'
+        : 'Writing the full critique first, so the ideas can aim at what it finds…'}</p>
       <p class="folder-hint">Request 1 of 2. The critique is saved to the card.</p>`;
     try {
       await api(`/api/cards/${encodeURIComponent(id)}/score`, {

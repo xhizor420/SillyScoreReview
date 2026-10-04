@@ -1778,6 +1778,29 @@ async function testTwoPassAndRawReplies() {
     assert.ok(cards.every((c) => c.overallScore === 6 && !c.brief));
     console.log('✓ Fast score then Full critique: the second pass critiques only the 5 cards without one, then has nothing left');
 
+    // "Update old scores": after the prompts change, every stale score is
+    // redone the way it was made — fast stays fast, full stays full.
+    await post('/api/cards/card-2.png/score', { detail: 'fast' });
+    for (const kind of ['fast', 'full']) {
+      const { PROMPT_KINDS } = await import('../src/prompts.js');
+      await post('/api/prompts', { kind, instructions: `${PROMPT_KINDS[kind].defaultInstructions}\nBe exacting.` });
+    }
+    let listed = (await (await fetch(`${base}/api/cards`)).json()).cards;
+    assert.equal(listed.filter((c) => c.promptStale).length, 6, 'changing the prompts marks every score as made with an older prompt');
+    seen.length = 0;
+    const upd = await post('/api/score/batch', { scope: 'stale', rescore: true, detail: 'same' });
+    assert.equal(upd.total, 6);
+    await finish(upd.jobId);
+    assert.deepEqual(seen.slice().sort(), ['fast', 'full', 'full', 'full', 'full', 'full'], 'one fast card redone fast, five full critiques redone full');
+    listed = (await (await fetch(`${base}/api/cards`)).json()).cards;
+    assert.equal(listed.filter((c) => c.promptStale).length, 0, 'nothing left on an older prompt');
+    assert.equal(listed.find((c) => c.id === 'card-2.png').brief, true, 'the fast-scored card is still a fast score');
+    const again2 = await post('/api/score/batch', { scope: 'stale', rescore: true, detail: 'same' });
+    assert.equal(again2.total, 0, 'pressing it again has nothing to do');
+    await finish(again2.jobId);
+    for (const kind of ['fast', 'full']) await post('/api/prompts', { kind, reset: true });
+    console.log('✓ "Update old scores" redoes every stale score the way it was made (fast stays fast, full stays full), then has nothing left');
+
     // the prompt test shows what came back — on success and on an unreadable answer
     const ok = await post('/api/prompts/test', { kind: 'fast', cardId: 'card-1.png' });
     assert.equal(ok.replies.length, 1);

@@ -458,7 +458,10 @@ export async function startServer(config) {
       });
     }
     const { ids, scope = 'selected', limit, rescore = false } = req.body || {};
-    const detail = req.body?.detail === 'full' || req.body?.detail === 'fast'
+    // "same": each card is redone the way it was made — a fast score stays a
+    // fast score, a full critique stays a full critique. What "Update old
+    // scores" uses, so bringing scores up to date never changes their kind.
+    const detail = ['full', 'fast', 'same'].includes(req.body?.detail)
       ? req.body.detail
       : config.scoreDetail || 'full';
     let files;
@@ -483,10 +486,13 @@ export async function startServer(config) {
           const entry = store.get(f);
           return !entry || entry.error || !entry.result || entry.result.brief;
         });
+      } else if (scope === 'stale') {
+        // Scores made with an older version of the prompt.
+        files = all.filter((f) => isPromptStale(store.get(f)));
       } else {
         files = all;
       }
-      if (!rescore && scope !== 'uncritiqued') {
+      if (!rescore && scope !== 'uncritiqued' && scope !== 'stale') {
         files = files.filter((f) => {
           const entry = store.get(f);
           return !entry || entry.error;
@@ -647,7 +653,8 @@ export async function startServer(config) {
           if (job.recent.length > 12) job.recent.pop();
         };
         try {
-          const entry = await scoreOne(file, provider, store, detail);
+          const cardDetail = detail === 'same' ? (store.get(file)?.result?.brief ? 'fast' : 'full') : detail;
+          const entry = await scoreOne(file, provider, store, cardDetail);
           job.connStreak = 0;
           job.done++;
           if (retrying.has(file)) {
